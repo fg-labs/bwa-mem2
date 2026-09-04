@@ -481,7 +481,8 @@ STANDALONE_TESTS = kswv_nrow_zero_test kswv_freed_cell_test \
                    detect_sa_compx_test nst_nt4_decode_test \
                    read_arena_overflow_test packed_text_neg_nbases_test \
                    packed_text_overflow_nbases_test \
-                   mem_gen_alt_zero_calloc_test srtgg_grow_multi_test
+                   mem_gen_alt_zero_calloc_test srtgg_grow_multi_test \
+                   kopen_pipe_status_test
 STANDALONE_TEST_OBJS = $(STANDALONE_TESTS:%=test/%.o)
 
 # shm_pack_round_trip_test is excluded from `test:` because it runs via
@@ -920,6 +921,11 @@ kt_for_pool_test: $(BWA_LIB) $(HTS_LIB) test/kt_for_pool_test.o
 srtgg_grow_multi_test: $(BWA_LIB) $(HTS_LIB) $(LIBSAIS_OBJS) test/srtgg_grow_multi_test.o
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $(LDFLAGS) test/srtgg_grow_multi_test.o $(BWA_LIB) $(LIBSAIS_OBJS) $(LIBS) -o $@
 
+# kopen_pipe_status_test links libbwa.a for kopen/kclose (src/kopen.o) and
+# exercises the `<cmd` pipe path with synthetic producers; no fixture, no arch.
+kopen_pipe_status_test: $(BWA_LIB) $(HTS_LIB) test/kopen_pipe_status_test.o
+	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $(LDFLAGS) test/kopen_pipe_status_test.o $(BWA_LIB) $(LIBS) -o $@
+
 # Standalone on purpose: it defines its own calloc so a zero-size request can
 # return NULL, and that interposition must not reach any other test. See the
 # header comment in the source.
@@ -1161,6 +1167,9 @@ test/kt_for_pool_test.o: test/kt_for_pool_test.cpp
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $(DEPFLAGS) $< -o $@
 
 test/srtgg_grow_multi_test.o: test/srtgg_grow_multi_test.cpp
+	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $(DEPFLAGS) $< -o $@
+
+test/kopen_pipe_status_test.o: test/kopen_pipe_status_test.cpp
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $(DEPFLAGS) $< -o $@
 
 test/bns_zero_calloc_test.o: test/bns_zero_calloc_test.cpp

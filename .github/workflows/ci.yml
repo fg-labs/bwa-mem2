@@ -512,6 +512,46 @@ jobs:
           make kvec_alloc_fail_test
           ./kvec_alloc_fail_test
 
+      - name: kopen pipe child status propagation
+        # Standalone binary exercising the `<cmd` pipe input path in
+        # src/kopen.cpp (kopen/kclose): the byte-identity fixtures are plain
+        # files, so nothing else covers the opener. It pins that kclose reaps
+        # the producer and returns its non-zero exit status, so a `<cmd` that
+        # dies mid-stream or never execs cannot masquerade as a clean EOF.
+        # Synthetic producers (echo/false/missing command); no fixture.
+        #
+        # This build DOES need arch/CXX propagation, same as bns_zero_calloc_test
+        # above: a bare `make` with no `arch=` on x86 falls back to the sse4.1
+        # floor (the Makefile's default ARCH_FLAGS), which differs from most
+        # rows' actual arch and changes the `.build-flags` stamp -- forcing
+        # libbwa.a to rebuild mid-job at the wrong tier. A later bare `make` in
+        # test/run_unit_tests.sh then relinks bwa_mem3_tests_unit against that
+        # rebuilt library without htslib's transitive libdeflate flags
+        # (HTSLIB_static_LIBS isn't threaded through that invocation), and the
+        # link fails. Passing the row's own arch keeps this build from ever
+        # disturbing shared state the rest of the job depends on. USE_MIMALLOC is
+        # carried from the row for the same reason: the .build-flags stamp keys on
+        # CPPFLAGS (which carries -DUSE_MIMALLOC=1), so omitting it lets the default
+        # USE_MIMALLOC=1 rebuild libbwa.a with mimalloc on the use_mimalloc="0" row.
+        run: |
+          if [ "${{ matrix.arch_flag }}" = "" ]; then
+            make kopen_pipe_status_test arch=${{ matrix.baseline_arch || 'avx2' }} \
+              CXX=${{ matrix.cxx || 'clang++-19' }} \
+              USE_MIMALLOC=${{ matrix.use_mimalloc }}
+          else
+            make kopen_pipe_status_test arch=${{ matrix.arch_flag }} \
+              CXX=${{ matrix.cxx || 'clang++-19' }} USE_MIMALLOC=${{ matrix.use_mimalloc }}
+          fi
+          ./kopen_pipe_status_test
+
+      - name: kopen pipe end-to-end status propagation (mem CLI)
+        # Complements the standalone test above: exercises the full `mem` CLI
+        # exit code and diagnostic (src/fastmap.cpp main_mem), not just
+        # kopen/kclose in isolation. Uses the already-built ./bwa-mem3 binary
+        # from the "Build bwa-mem3" step above -- no rebuild, so no arch
+        # propagation is needed here.
+        run: bash test/kopen_pipe_e2e_test.sh ./bwa-mem3 test/fixtures
+
       - name: Run integration tests
         if: matrix.run_integration == true
         env:

@@ -3336,7 +3336,8 @@ int main_mem(int argc, char *argv[])
             if (ko2 == 0) {
                 fprintf(stderr, "[E::%s] failed to open file `%s'.\n", __func__, argv[optind + 2]);
                 free(opt);
-                free(ko);
+                // kclose(ko) below owns and frees the handle; a free(ko) here
+                // would make that a use-after-free + double free.
                 if (aux.legacy_reader) { err_gzclose(fp); kseq_destroy(aux.ks); }
                 else { fast_kseq_destroy(aux.frks); fast_reader_close(aux.fr1); }
                 if (out_opened)
@@ -3749,18 +3750,33 @@ int main_mem(int argc, char *argv[])
     free(opt);
     if (aux.legacy_reader) { kseq_destroy(aux.ks); err_gzclose(fp); }
     else { fast_kseq_destroy(aux.frks); fast_reader_close(aux.fr1); }
-    kclose(ko);
+    // kclose reaps a `<cmd` input producer and returns its non-zero exit status;
+    // capture it so a failed producer can't masquerade as a successful run.
+    int ko_close_rc = kclose(ko);
 
     // PAIRED_END
+    int ko2_close_rc = 0;
     if (aux.ks2 || aux.fr2) {
         if (aux.legacy_reader) { kseq_destroy(aux.ks2); err_gzclose(fp2); }
         else { fast_kseq_destroy(aux.frks2); fast_reader_close(aux.fr2); }
-        kclose(ko2);
+        ko2_close_rc = kclose(ko2);
     }
 
     /* BGZF flush + EOF marker errors surface only on close. Propagate to the
      * exit code so a truncated BAM doesn't masquerade as a successful run. */
     int exit_code = 0;
+    // Name the failing input and its status (kclose returns the producer's exit
+    // code) so a two-input run tells the user which `<cmd` producer died.
+    if (ko_close_rc != 0) {
+        fprintf(stderr, "ERROR: input command `%s' exited with status %d\n",
+                argv[optind + 1], ko_close_rc);
+        exit_code = 1;
+    }
+    if (ko2_close_rc != 0) {
+        fprintf(stderr, "ERROR: input command `%s' exited with status %d\n",
+                argv[optind + 2], ko2_close_rc);
+        exit_code = 1;
+    }
     if (meth_mode_local && g_meth_bam_writer != NULL) {
         int rc = meth_bam_writer_close(g_meth_bam_writer);
         if (rc != 0) {
