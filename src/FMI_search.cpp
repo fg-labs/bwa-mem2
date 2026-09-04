@@ -643,6 +643,22 @@ void FMI_search::load_index(bool load_pac, int n_threads)
     {
         count[ii] = count[ii] + 1;
     }
+    // Validate count[] (post +1-adjustment, range [1, ref_seq_len+1]) as
+    // load_index_from_shm does; a count[a] exceeding the reference length drives
+    // smem.k out of cp_occ on the first backwardExt.
+    for (ii = 0; ii < 5; ii++) {
+        // Lower bound is 1, not 0: the +1 adjustment above is applied before
+        // this check (load_index_from_shm instead validates the raw disk value
+        // in [0, ref_seq_len] and adjusts after), so a disk count[ii] == -1
+        // becomes 0 here and would slip past a >= 0 test -- leaving the disk
+        // loader open to an invalid FM interval that the shm producer rejects.
+        xassert(count[ii] >= 1 && count[ii] <= reference_seq_len + 1,
+                "FMI index: count[] out of bounds (corrupt .bwt.2bit.64?)");
+        // count[] is the cumulative C[] array, so it must be non-decreasing; a
+        // non-monotone pair yields a negative smem.s (interval width) downstream.
+        xassert(ii == 0 || count[ii] >= count[ii - 1],
+                "FMI index: count[] not monotonically non-decreasing (corrupt .bwt.2bit.64?)");
+    }
 
     #if SA_COMPRESSION
 
