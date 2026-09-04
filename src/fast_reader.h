@@ -29,7 +29,10 @@ typedef enum {
 
 /* Classify an input by its leading bytes. Up to 18 bytes are needed to
  * distinguish BGZF from plain gzip (the BC extra subfield carrying BSIZE);
- * fewer bytes is fine and short/empty input classifies as FR_PLAIN. */
+ * fewer bytes is fine. Input that does not begin with a known magic classifies
+ * as FR_PLAIN, but a short buffer that starts with the gzip magic (1f 8b) yet
+ * is shorter than 18 bytes classifies as FR_GZIP (the BGZF distinction is what
+ * needs the full 18 bytes), and empty/1-byte input is FR_PLAIN. */
 fr_format_t fr_detect(const unsigned char *hdr, size_t n);
 
 typedef struct fast_reader fast_reader_t;

@@ -484,20 +484,31 @@ jobs:
           ./mem_gen_alt_zero_calloc_test
 
       - name: Fast-reader batch reader safety and coverage
-        # Standalone tests for the bseq_read_fast adapter, which no workflow ran
-        # until now (they were reachable only from `make test`). Two checks:
+        # Standalone tests for the fast_reader stack and bseq_read_fast adapter,
+        # which no workflow ran until now (they were reachable only from
+        # `make test`). Four checks:
+        #   - fast_reader_selftest: codec round-trips (plain/gzip/multi-member
+        #     gzip/BGZF) plus the truncated-stream contract -- a mid-member
+        #     truncation must surface fast_reader_read == -1, never a short clean
+        #     read that the layer above reads as EOF.
         #   - bseq_read_pe_oob_test (ASan): the paired-end odd-capacity
         #     out-of-bounds regression -- a paired iteration writes two records
         #     but capacity was checked once, so an odd initial estimate overran
         #     the buffer by one. Built with ASan so any regression aborts.
         #   - bseq_read_comment_copy_test: the copy_comment/-C gate (comment
         #     copied through only when requested AND present), across SE/PE.
+        #   - bseq_read_truncated_gzip_test: the end-to-end truncation contract --
+        #     a mid-member-truncated .fq.gz must abort (err_fatal) through the full
+        #     fast_reader -> fr_fastq -> bseq_read_fast chain, not swallow the
+        #     corruption as clean EOF. Forked: the child must die by SIGABRT.
         # Reader TUs only (no libbwa link), so no arch/CXX propagation is needed;
         # run on every row for toolchain coverage.
         run: |
-          make bseq_read_pe_oob_test bseq_read_comment_copy_test
+          make fast_reader_selftest bseq_read_pe_oob_test bseq_read_comment_copy_test bseq_read_truncated_gzip_test
+          ./fast_reader_selftest
           ./bseq_read_pe_oob_test
           ./bseq_read_comment_copy_test
+          ./bseq_read_truncated_gzip_test
       - name: kvec growth aborts on realloc failure
         # Header-only standalone binary, forked like a death test: it forces the
         # realloc behind kvec.h's growth macros to fail and asserts the child
