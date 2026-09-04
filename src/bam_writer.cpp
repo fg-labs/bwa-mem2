@@ -118,9 +118,11 @@ bam_writer_t *bam_writer_open(const char *path, const bntseq_t *bns,
             /* The n + 2 bound above is derived from bwa_hdr_next_line never
              * yielding a phantom empty final record. Pin that derivation here:
              * if the iterator's trailing-newline handling ever changes, this
-             * trips in a debug/ASAN build instead of silently overflowing the
-             * buffer by one byte again. */
-            assert(w <= n + 1);
+             * aborts (xassert is live in every build -- NDEBUG is never defined)
+             * instead of silently overflowing the buffer by one byte again.
+             * (Post-hoc detection; a per-line pre-write bound check would be the
+             * fuller fix.) */
+            xassert(w <= n + 1, "bam_writer: header filter overran its buffer");
             filtered[w] = '\0';
             to_add = filtered;
         }
