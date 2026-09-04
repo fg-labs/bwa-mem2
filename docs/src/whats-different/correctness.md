@@ -254,9 +254,8 @@ control (`main`) versus this branch on a 2×150 bp WGS workload (HG002, hg38) at
 default flags, with inputs, flags, thread count (`-t`), and batching (`-K`) all
 held fixed across the two runs — so the batch composition is identical — on both
 the ARM64 (NEON) and x86_64 (AVX2 and AVX-512BW) tiers. A `getScores16` band-clamp
-regression test (`test/unit/test_bandedswa_band_clamp.cpp`) compares `score`,
-`tle`, `qle`, and `max_off` to the `scalarBandedSWA` oracle unconditionally, and
-`gscore`/`gtle`
+regression test compares `score`, `tle`, `qle`, and `max_off` to the
+`scalarBandedSWA` oracle unconditionally, and `gscore`/`gtle`
 only when either side reports `gscore > 0` (a to-end alignment is observable),
 across the wrap scoring sets on NEON, AVX2, and AVX-512BW: it fails on the old
 kernel and passes on the fixed one.
@@ -266,11 +265,13 @@ kernel and passes on the fixed one.
 Every SIMD banded-SW wrapper (`getScores8`/`getScores16`, all widths) copies each
 pair's reference window (`len1`) and query (`len2`) into the SoA lane buffers and
 sizes the per-lane band from those lengths. `SeqPair::len1`/`len2` are signed
-`int32_t`, and the wrappers previously checked only the **upper** bound
-(`len >= MAX_SEQ_LEN8`/`MAX_SEQ_LEN16`), so an out-of-range length that slipped
-through — a **negative** length, or one at or above the packing limit — would index
-the SoA copy/padding buffers out of bounds (negative `k`) or wrap the per-lane
-`uint8_t`/`uint16_t` band quantity. The guards are now symmetric: each wrapper
+`int32_t`, and the wrappers previously did almost no length validation: five of the
+six checked neither length, and the sixth (the AVX2 8-bit wrapper) checked only
+`len2`'s **upper** bound — a non-fatal `stderr` warning plus a debug `assert` — while
+no wrapper ever checked `len1` or a lower bound. So a **negative** length, an
+out-of-range `len1` in any wrapper, or an over-limit `len2` in any of the other five
+would index the SoA copy/padding buffers out of bounds (negative `k`) or wrap the
+per-lane `uint8_t`/`uint16_t` band quantity. The guards are now symmetric: each wrapper
 rejects both `len1` and `len2` outside `[0, MAX_SEQ_LEN8)` / `[0, MAX_SEQ_LEN16)`
 via `err_fatal` **before any use of those lengths** — the SoA copy and padding
 loops and the per-lane band-size calculation (`qlen[j] = len2 * max`, whose signed
@@ -289,6 +290,60 @@ at a fixed batch composition; the x86 tiers (SSE4.1, AVX2, AVX-512BW) are built 
 exercised on every CI run. That scopes the measured result to this workload, host,
 and tier — the by-construction invariant above is what extends it to all valid
 inputs.
+
+---
+
+## Banded-SW `qlen` band-clamp reach slot overflow (PR #468)
+
+The batch banded-SW wrappers (`smithWatermanBatchWrapper{8,16}`, all widths)
+pre-scale the per-lane band-clamp reach as `len2 * max_sc` and stash it in an SoA
+slot the clamp loop reads back. That slot was the narrow per-lane element type —
+`uint8_t` on the 8-bit tiers, `uint16_t` on the 16-bit tiers — so the scaled reach
+wraps once `len2 * max_sc` exceeds 255 / 65535. `max_sc` is the largest
+scoring-matrix entry, i.e. the match reward `A` (mismatch and ambiguous entries are
+stored negative), so the wrap trigger is `len2 * A` crossing the slot ceiling and
+does **not** depend on `-B`. A wrapped reach makes the vector band **narrower** than
+`scalarBandedSWA` computes (which keeps the reach in native `int`), so the extension
+can miss an off-diagonal optimum the scalar reference finds. The fix carries the
+scaled reach in a wide `int32_t qlen_scaled[]` slot, matching the scalar band
+formula exactly. This is the storage-slot sibling of #423, which fixed the reach
+*sum* (a `uint16_t` modular add) but still read `len2 * max_sc` back from the narrow
+slot.
+
+The reachable divergence is the **16-bit tier only**. On the 8-bit tier the
+production routing envelope (`bsw8_envelope_ok`) admits a pair only when
+`h0 + len2 * A < 255 - max_step` with `len1 >= len2`, so `len2 * A < 255` for every
+routed pair and the narrow `uint8_t` slot never overflows — the 8-bit widening is
+**defensive** (no shipped-output change). The 16-bit slot overflows at
+non-default `-A >= 3` with a long query segment (`len2 * A > 65535` — e.g.
+`len2 ~ 21846 bp` at `-A3`; `MAX_SEQ_LEN16 = 32768` caps `len2 <= 32767`). Output can
+diverge only when an off-diagonal optimum requires a band wider than the wrapped
+reach; `-A2` cannot reach it (`len2 * 2 <= 65534`). On bwa's default
+`-A1` and normal read lengths the product never wraps, so the wide slot computes the
+identical band and the emitted **alignment records** are **byte-identical by
+construction** for a fixed batch composition — an integer-arithmetic invariant
+independent of host, compiler, and thread count; the SAM header block is outside this
+claim.
+
+A `getScores{8,16}` band-clamp regression test compares `score`, `tle`, `qle`, and
+`max_off` — plus `gscore`/`gtle` under the kernel's query-end contract — to the
+`scalarBandedSWA` oracle across the wrap scoring sets, including a case that
+constructs the reachable 16-bit long-read overflow: it fails on the old narrow-slot
+kernel and passes on the fixed one (18 subcases across 3 doctest cases, 36 assertions).
+Its pairs are generated with deterministic, bounded query/reference lengths at a fixed
+batch composition, and it runs on the SIMD tier its binary is compiled for — SSE4.1 and
+AVX2 on CI's x86 rows, and NEON on the arm64 row and local Apple Silicon builds.
+A full-field kernel byte-identity gate over the extension and mate-rescue result
+fields — every field
+per pair, 60,009 pairs per cell — additionally showed **zero** discordant pairs at
+query/reference lengths 100/150/250 for default `-A1` (and a 10%-ambiguous-base
+variant) and non-default `-A3` on the forced 16-bit tier, at a fixed batch
+composition on arm64 (Apple Silicon M2 Max, NEON tier); the x86 tiers (SSE4.1, AVX2, AVX-512BW) are built and exercised
+on every CI run. That scopes the measured result to this workload, host, and tier —
+the by-construction invariant above is what extends it to all valid inputs.
+bwa-mem2 inherits the same narrow-slot overflow, so on the affected reads this
+diverges from bwa-mem2 while converging bwa-mem3's vector tiers onto its own scalar
+reference.
 
 ---
 
@@ -341,6 +396,7 @@ standard fixtures do not exercise the `-` input. The direct-copy forward path (w
 | 16-bit banded-SW per-lane band clamp (wide arithmetic) | [#423](https://github.com/fg-labs/bwa-mem3/pull/423) | — | fork-only (non-default scoring only; default path unchanged — see the correctness note above) |
 | `--meth` SEQ restore clamps unsupported bytes to `N` | [#463](https://github.com/fg-labs/bwa-mem3/pull/463) | — | fork-only (`--meth` only; changes a `-` byte to `N` on the `nst_nt4_table` lookup paths only — the direct-copy forward path, all other bytes, and the default path are unchanged) |
 | Symmetric ref/query length bounds guards on the SW wrappers | [#467](https://github.com/fg-labs/bwa-mem3/pull/467) | — | fork-only (invalid-input contract; valid-input records byte-identical by construction — see the PR #467 correctness note above for the measured scope) |
+| Banded-SW `qlen` band-clamp reach slot overflow (`int32_t` reach) | [#468](https://github.com/fg-labs/bwa-mem3/pull/468) | — | fork-only (8-bit widening defensive; 16-bit divergence only at non-default `-A >= 3` long-query, `len2 * A > 65535` — default alignment records unchanged for fixed batch composition, see the correctness note above) |
 | kseq2bseq1 zero-initialization | [#22](https://github.com/fg-labs/bwa-mem3/pull/22) | — | fork-only |
 | Proper-pair flag from emitted alignment | [#17](https://github.com/fg-labs/bwa-mem3/pull/17) | — | fork-only, **opt-in** (`--proper-pair-from-emitted`; default matches both upstreams, [#362](https://github.com/fg-labs/bwa-mem3/issues/362)) |
 

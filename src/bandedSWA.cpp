@@ -699,7 +699,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
         uint8_t *seq2;
         uint8_t h0[SIMD_WIDTH8]   __attribute__((aligned(64)));
         uint8_t band[SIMD_WIDTH8];      
-        uint8_t qlen[SIMD_WIDTH8] __attribute__((aligned(64)));
+        int32_t qlen_scaled[SIMD_WIDTH8] __attribute__((aligned(64)));  /* len2*max_sc for the band-clamp reach, in a wide int32 slot (a narrow uint8 slot overflows it for long reads / -A>1). The 8-bit DP kernel takes no qlen[], so unlike the 16-bit tiers there is no narrow companion array here. */
         int32_t bsize = 0;
         
         int8_t *H1 = H8_ + tid * SIMD_WIDTH8 * MAX_SEQ_LEN8;
@@ -772,7 +772,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
                 {
                     mySeq1SoA[k * SIMD_WIDTH8 + j] = seq1[k] /* PR16: N stays 4 */;
                 }
-                qlen[j] = sp.len2 * max;
+                qlen_scaled[j] = sp.len2 * max;
                 if(maxLen1 < sp.len1) maxLen1 = sp.len1;
             }
 
@@ -862,7 +862,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
                  * the clamp and running a far wider band than the scalar reference.
                  * Per-batch (SIMD_WIDTH8 lanes), not per-cell, so wide math is free. */
                 for (int l = 0; l < SIMD_WIDTH8; l++) {
-                    const int ql    = (int) qlen[l];
+                    const int ql    = qlen_scaled[l];
                     const int reach = ql + eb;
                     int max_ins = (int)((double)(reach - o_ins) / e_ins + 1.0);
                     if (max_ins < 1) max_ins = 1;
@@ -1706,6 +1706,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
         uint16_t h0[SIMD_WIDTH16]   __attribute__((aligned(64)));
         uint16_t band[SIMD_WIDTH16];        
         uint16_t qlen[SIMD_WIDTH16] __attribute__((aligned(64)));
+        int32_t qlen_scaled[SIMD_WIDTH16] __attribute__((aligned(64)));  /* len2*max_sc for the band-clamp reach, in a wide int32 slot (the narrow uint16 qlen[] overflows it for long reads / -A>1). qlen[] itself is refilled with len2 by smithWaterman*_16 for the DP. */
         int32_t bsize = 0;
         
         int16_t *H1 = H16_ + tid * SIMD_WIDTH16 * MAX_SEQ_LEN16;
@@ -1753,7 +1754,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
                 {
                     mySeq1SoA[k * SIMD_WIDTH16 + j] = (seq1[k] == AMBIG?0xFFFF:seq1[k]);
                 }
-                qlen[j] = sp.len2 * max;
+                qlen_scaled[j] = sp.len2 * max;
                 if(maxLen1 < sp.len1) maxLen1 = sp.len1;
             }
 
@@ -1831,11 +1832,12 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
                  * the sum back through uint16_t, so a negative or >65535 reach
                  * wrapped -- silently disabling the clamp and running a far wider
                  * band than the scalar reference on non-default gap penalties.
-                 * qlen[l] already holds qlen*max_sc (see the qlen SoA fill), so
-                 * reach is qlen[l] + end_bonus. Per-batch (SIMD_WIDTH16 lanes),
-                 * not per-cell, so wide math is free. */
+                 * qlen_scaled[l] holds len2*max_sc in a wide int32 slot (the narrow
+                 * uint16_t qlen[] fill overflowed it for long reads), so reach is
+                 * qlen_scaled[l] + end_bonus. Per-batch (SIMD_WIDTH16 lanes), not
+                 * per-cell, so wide math is free. */
                 for (int l = 0; l < SIMD_WIDTH16; l++) {
-                    const int ql    = (int) qlen[l];
+                    const int ql    = qlen_scaled[l];
                     const int reach = ql + eb;
                     int max_ins = (int)((double)(reach - o_ins) / e_ins + 1.0);
                     if (max_ins < 1) max_ins = 1;
@@ -2621,7 +2623,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
         uint8_t *seq2;
         uint8_t h0[SIMD_WIDTH8]   __attribute__((aligned(64)));
         uint8_t band[SIMD_WIDTH8];      
-        uint8_t qlen[SIMD_WIDTH8] __attribute__((aligned(64)));
+        int32_t qlen_scaled[SIMD_WIDTH8] __attribute__((aligned(64)));  /* len2*max_sc for the band-clamp reach, in a wide int32 slot (a narrow uint8 slot overflows it for long reads / -A>1). The 8-bit DP kernel takes no qlen[], so unlike the 16-bit tiers there is no narrow companion array here. */
         int32_t bsize = 0;
         
         int8_t *H1 = H8_ + tid * SIMD_WIDTH8 * MAX_SEQ_LEN8;
@@ -2694,7 +2696,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
                 {
                     mySeq1SoA[k * SIMD_WIDTH8 + j] = seq1[k] /* PR16: N stays 4 */;
                 }
-                qlen[j] = sp.len2 * max;
+                qlen_scaled[j] = sp.len2 * max;
                 if(maxLen1 < sp.len1) maxLen1 = sp.len1;
             }
 
@@ -2771,7 +2773,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
                  * the clamp and running a far wider band than the scalar reference.
                  * Per-batch (SIMD_WIDTH8 lanes), not per-cell, so wide math is free. */
                 for (int l = 0; l < SIMD_WIDTH8; l++) {
-                    const int ql    = (int) qlen[l];
+                    const int ql    = qlen_scaled[l];
                     const int reach = ql + eb;
                     int max_ins = (int)((double)(reach - o_ins) / e_ins + 1.0);
                     if (max_ins < 1) max_ins = 1;
@@ -3596,6 +3598,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
         uint16_t h0[SIMD_WIDTH16]   __attribute__((aligned(64)));
         uint16_t band[SIMD_WIDTH16];        
         uint16_t qlen[SIMD_WIDTH16] __attribute__((aligned(64)));
+        int32_t qlen_scaled[SIMD_WIDTH16] __attribute__((aligned(64)));  /* len2*max_sc for the band-clamp reach, in a wide int32 slot (the narrow uint16 qlen[] overflows it for long reads / -A>1). qlen[] itself is refilled with len2 by smithWaterman*_16 for the DP. */
         int32_t bsize = 0;
 
         // PR: SoA N-encoding for the AVX-512 16-bit prepass. On the symmetric
@@ -3653,7 +3656,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
                     mySeq1SoA[k * SIMD_WIDTH16 + j] = (seq1[k] == AMBIG ? ambRef : seq1[k]);
                 }
                 
-                qlen[j] = sp.len2 * max;
+                qlen_scaled[j] = sp.len2 * max;
                 if(maxLen1 < sp.len1) maxLen1 = sp.len1;
             }
 
@@ -3732,11 +3735,12 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
                  * the sum back through uint16_t, so a negative or >65535 reach
                  * wrapped -- silently disabling the clamp and running a far wider
                  * band than the scalar reference on non-default gap penalties.
-                 * qlen[l] already holds qlen*max_sc (see the qlen SoA fill), so
-                 * reach is qlen[l] + end_bonus. Per-batch (SIMD_WIDTH16 lanes),
-                 * not per-cell, so wide math is free. */
+                 * qlen_scaled[l] holds len2*max_sc in a wide int32 slot (the narrow
+                 * uint16_t qlen[] fill overflowed it for long reads), so reach is
+                 * qlen_scaled[l] + end_bonus. Per-batch (SIMD_WIDTH16 lanes), not
+                 * per-cell, so wide math is free. */
                 for (int l = 0; l < SIMD_WIDTH16; l++) {
-                    const int ql    = (int) qlen[l];
+                    const int ql    = qlen_scaled[l];
                     const int reach = ql + eb;
                     int max_ins = (int)((double)(reach - o_ins) / e_ins + 1.0);
                     if (max_ins < 1) max_ins = 1;
@@ -4570,6 +4574,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
         uint8_t *seq2;
         uint16_t h0[SIMD_WIDTH16]  __attribute__((aligned(64)));
         uint16_t qlen[SIMD_WIDTH16] __attribute__((aligned(64)));
+        int32_t qlen_scaled[SIMD_WIDTH16] __attribute__((aligned(64)));  /* len2*max_sc for the band-clamp reach, in a wide int32 slot (the narrow uint16 qlen[] overflows it for long reads / -A>1). qlen[] itself is refilled with len2 by smithWaterman*_16 for the DP. */
         int32_t bsize = 0;
 
         // SoA N-encoding for the 128-bit 16-bit prepass, chosen per architecture.
@@ -4633,7 +4638,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
                 {
                     mySeq1SoA[k * SIMD_WIDTH16 + j] = (seq1[k] == AMBIG ? ambRef : seq1[k]);
                 }
-                qlen[j] = sp.len2 * max;
+                qlen_scaled[j] = sp.len2 * max;
                 if(maxLen1 < sp.len1) maxLen1 = sp.len1;
             }
 
@@ -4715,11 +4720,12 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
                  * the sum back through uint16_t, so a negative or >65535 reach
                  * wrapped -- silently disabling the clamp and running a far wider
                  * band than the scalar reference on non-default gap penalties.
-                 * qlen[l] already holds qlen*max_sc (see the qlen SoA fill), so
-                 * reach is qlen[l] + end_bonus. Per-batch (SIMD_WIDTH16 lanes),
-                 * not per-cell, so wide math is free. */
+                 * qlen_scaled[l] holds len2*max_sc in a wide int32 slot (the narrow
+                 * uint16_t qlen[] fill overflowed it for long reads), so reach is
+                 * qlen_scaled[l] + end_bonus. Per-batch (SIMD_WIDTH16 lanes), not
+                 * per-cell, so wide math is free. */
                 for (int l = 0; l < SIMD_WIDTH16; l++) {
-                    const int ql    = (int) qlen[l];
+                    const int ql    = qlen_scaled[l];
                     const int reach = ql + eb;
                     int max_ins = (int)((double)(reach - o_ins) / e_ins + 1.0);
                     if (max_ins < 1) max_ins = 1;
@@ -5596,7 +5602,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
         uint8_t *seq1;
         uint8_t *seq2;
         uint8_t h0[SIMD_WIDTH8]   __attribute__((aligned(64)));
-        uint8_t qlen[SIMD_WIDTH8] __attribute__((aligned(64)));
+        int32_t qlen_scaled[SIMD_WIDTH8] __attribute__((aligned(64)));  /* len2*max_sc for the band-clamp reach, in a wide int32 slot (a narrow uint8 slot overflows it for long reads / -A>1). The 8-bit DP kernel takes no qlen[], so unlike the 16-bit tiers there is no narrow companion array here. */
         int32_t bsize = 0;
 
         int8_t *H1 = H8_ + tid * SIMD_WIDTH8 * MAX_SEQ_LEN8;
@@ -5668,7 +5674,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
                 {
                     mySeq1SoA[k * SIMD_WIDTH8 + j] = seq1[k] /* PR16: N stays 4 */;
                 }
-                qlen[j] = sp.len2 * max;
+                qlen_scaled[j] = sp.len2 * max;
                 if(maxLen1 < sp.len1) maxLen1 = sp.len1;
             }
 
@@ -5768,14 +5774,14 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
                 // explored cells scalar never visits, and returned different gscore/gtle
                 // (the query-end fields) -- for example qlen=10, end_bonus=5, -O16 gives
                 // 10 + 5 - 16 = -1 -> 255. Reachable at bwa's DEFAULT -O6 as soon as
-                // end_bonus is small and the query is short (1 + 0 - 6 < 0). qlen[l]
-                // already holds qlen*max_sc (see the qlen SoA fill), so reach is just
-                // qlen[l] + end_bonus; that scaled reach does not fit int8, and this
+                // end_bonus is small and the query is short (1 + 0 - 6 < 0). qlen_scaled[l]
+                // holds len2*max_sc (see the SoA fill above), so reach is just
+                // qlen_scaled[l] + end_bonus; that scaled reach does not fit int8, and this
                 // loop is per-batch (16 lanes), not per-cell, so there is nothing to
                 // gain by vectorizing it.
                 // Regression: test/unit/test_bandedswa_band_clamp.cpp.
                 for (int l = 0; l < SIMD_WIDTH8; l++) {
-                    const int ql   = (int) qlen[l];
+                    const int ql   = qlen_scaled[l];
                     const int reach = ql + eb;
                     int max_ins = (int)((double)(reach - o_ins) / e_ins + 1.0);
                     if (max_ins < 1) max_ins = 1;

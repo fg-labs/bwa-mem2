@@ -232,6 +232,98 @@ long trial16(int a, int b, int o, int e, int zdrop, int w, int end_bonus,
     return diffs;
 }
 
+/// Long-read fill-overflow case for the 16-bit tier -- the *reachable* half of #468.
+///
+/// This is a DIFFERENT failure from the short-query wrap the `trial16` cases above
+/// exercise. There the clamp's own add wrapped a NEGATIVE reach; here the wrapper's
+/// SoA fill `len2 * max_sc` overflows the narrow `uint16_t` slot on its own for a
+/// long query at `-A >= 3` (`len2 * max_sc > 65535` -- e.g. len2 = 21846 at -A3 ->
+/// 65538, which truncates to 2 in a uint16_t). The truncated reach clamps the vector
+/// band to ~2, so an off-diagonal indel wider than that is missed, while the wide
+/// `int32_t` slot (post-fix) keeps the full band `w`. `-A2` cannot reach this: the
+/// ref-window guard caps `len2 <= 32767`, so `len2 * 2 <= 65534` never overflows.
+///
+/// The actual alignment score stays inside int16 -- a short high-scoring motif in an
+/// otherwise-mismatching long read -- so the pair is a valid 16-bit-tier input even
+/// though `len2 * max_sc` is not. The optimum matches motif A on the diagonal, deletes
+/// `del` ref bases, then matches motif B off-diagonal by `del`; reaching B needs band
+/// >= del. Fails on the pre-fix (narrow-slot) build (vector band ~2 < del, misses B)
+/// and passes after (vector band == scalar band == w). Every lane carries the identical
+/// constructed pair (deterministic), so a whole batch is checked.
+long trial16_longread_fill_overflow(int a, int b, int o, int e, int zdrop, int w,
+                                    int end_bonus, int len2, int del, long *checked)
+{
+    const int len1   = len2 + del;                 /* ref carries the extra `del` bases */
+    const int STRIDE = len1 + 8;
+    const int M      = 30;                          /* motif length (A and B) */
+
+    int8_t mat[25];
+    { int k = 0;
+      for (int i = 0; i < 4; ++i) { for (int j = 0; j < 4; ++j) mat[k++] = (i == j) ? (int8_t)a : (int8_t)-b; mat[k++] = -1; }
+      for (int j = 0; j < 5; ++j) mat[k++] = -1; }
+
+    BandedPairWiseSW bsw(o, e, o, e, zdrop, end_bonus, mat, (int8_t)a, (int8_t)b, 1);
+
+    const long n = SIMD_WIDTH16;                    /* exactly one batch, no padding */
+    std::mt19937_64 rng(0x106EAD16ull);
+    std::vector<uint8_t> ref((size_t)STRIDE * n, 0), qer((size_t)STRIDE * n, 0);
+
+    /* Build ONE golden pair in lane 0, then replicate it across every lane.
+     *   ref (target, len1): [A:M][del bases][B:M][random tail]
+     *   qer (query,  len2): [A:M]          [B:M][random tail]
+     * A and B are exact matches; the deletion bases live only in ref; the tail is
+     * independent random, so it cannot beat the motif and zdrop terminates through it. */
+    uint8_t A[M], B[M];
+    for (int i = 0; i < M; i++) A[i] = (uint8_t)(rng() % 4);
+    for (int i = 0; i < M; i++) B[i] = (uint8_t)(rng() % 4);
+
+    uint8_t *rr = ref.data(), *qq = qer.data();    /* lane 0 */
+    for (int i = 0; i < len1; i++) rr[i] = (uint8_t)(rng() % 4);
+    for (int i = 0; i < len2; i++) qq[i] = (uint8_t)(rng() % 4);
+    for (int i = 0; i < M; i++) { rr[i] = A[i]; qq[i] = A[i]; }              /* A on-diagonal at 0 */
+    for (int i = 0; i < M; i++) { rr[M + del + i] = B[i]; qq[M + i] = B[i]; } /* B off-diagonal by del */
+
+    for (long c = 1; c < n; ++c) {                 /* replicate lane 0 */
+        std::copy(rr, rr + len1, ref.data() + (size_t)c * STRIDE);
+        std::copy(qq, qq + len2, qer.data() + (size_t)c * STRIDE);
+    }
+
+    Out oracle;
+    oracle.score = bsw.scalarBandedSWA(len2, qq, len1, rr, w, /*h0*/ 1,
+                                       &oracle.qle, &oracle.tle, &oracle.gtle,
+                                       &oracle.gscore, &oracle.max_off);
+
+    std::vector<SeqPair> pairs(n);
+    for (long c = 0; c < n; ++c) {
+        SeqPair &p = pairs[c];
+        p.id = c; p.len1 = len1; p.len2 = len2; p.h0 = 1;
+        p.idr = (int)((size_t)c * STRIDE); p.idq = (int)((size_t)c * STRIDE);
+        p.seqid = c; p.regid = c;
+        p.score = p.tle = p.gtle = p.qle = p.gscore = p.max_off = -1;
+    }
+    *checked = n;
+    bsw.getScores16(pairs.data(), ref.data(), qer.data(), (int32_t)n, 1, w);
+
+    long diffs = 0;
+    for (long c = 0; c < n; ++c) {
+        const SeqPair &g = pairs[c];
+        const bool local_differs = g.score != oracle.score || g.tle != oracle.tle ||
+                                   g.qle != oracle.qle || g.max_off != oracle.max_off;
+        const bool toend_observable = g.gscore > 0 || oracle.gscore > 0;
+        const bool toend_differs = toend_observable &&
+                                   (g.gscore != oracle.gscore || g.gtle != oracle.gtle);
+        if (local_differs || toend_differs) {
+            if (diffs < 3)
+                MESSAGE("  lane=" << c << " len1=" << g.len1 << " len2=" << g.len2
+                        << " | vec " << g.score << "/" << g.tle << "/" << g.qle << "/"
+                        << g.max_off << " | scalar " << oracle.score << "/" << oracle.tle
+                        << "/" << oracle.qle << "/" << oracle.max_off);
+            diffs++;
+        }
+    }
+    return diffs;
+}
+
 } // namespace
 
 TEST_CASE("bandedSWA 8-bit per-lane band clamp matches the scalar reference"
@@ -288,6 +380,33 @@ TEST_CASE("bandedSWA 16-bit per-lane band clamp matches the scalar reference"
             long checked = 0;
             const long diffs = trial16(c.a, c.b, c.o, c.e, 100, 100, c.end_bonus,
                                        c.minq, c.maxq, 8000, &checked);
+            CHECK(checked > 0);
+            CHECK(diffs == 0);
+        }
+    }
+}
+
+TEST_CASE("bandedSWA 16-bit band clamp: long-read fill overflow (the reachable half of #468)"
+          * doctest::test_suite("unit/bandedswa")) {
+    // The wrapper's `len2 * max_sc` SoA fill overflows the narrow uint16_t slot for a
+    // long query at -A >= 3. The old narrow slot truncated the band-clamp reach, so the
+    // vector explored a band ~2 wide where the scalar reference used the full band w and
+    // captured an off-diagonal deletion. Each case's `del` exceeds the truncated band but
+    // is <= w, so it must FAIL on the pre-fix (narrow-slot) build and PASS after -- unlike
+    // the short-query cases above, this is the only half of the fix that is reachable in
+    // the production routing envelope.
+    struct Case { int a, b, o, e, w, end_bonus, len2, del; const char *label; };
+    const Case cases[] = {
+        // len2*a overflows uint16_t and truncates to a tiny reach:
+        {3, 8, 6, 1, 100, 5, 21846, 10, "-A3 len2=21846 (65538 -> 2), 10bp deletion"},
+        {4, 9, 6, 1, 100, 5, 16384, 12, "-A4 len2=16384 (65536 -> 0), 12bp deletion"},
+    };
+
+    for (const Case &c : cases) {
+        SUBCASE(c.label) {
+            long checked = 0;
+            const long diffs = trial16_longread_fill_overflow(
+                c.a, c.b, c.o, c.e, /*zdrop*/ 100, c.w, c.end_bonus, c.len2, c.del, &checked);
             CHECK(checked > 0);
             CHECK(diffs == 0);
         }
