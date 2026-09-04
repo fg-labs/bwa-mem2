@@ -162,6 +162,16 @@ void fmi_pread_from_stream(FILE *fp, void *dst, size_t nbytes, int nthreads);
  * stock indexes for no benefit. */
 int64_t detect_sa_compx(int fd, int64_t file_size, int64_t ref_seq_len, int64_t default_compx);
 
+/* Worker count for the index load: the caller's `n_threads` clamped to [1, 8],
+ * overridable via the BWA3_LOAD_THREADS environment variable. A malformed
+ * override (non-numeric, trailing garbage, non-positive, or unrepresentable as
+ * a long) is warned about and ignored, keeping the computed default; a valid
+ * override is honored and clamped to a 64-thread ceiling. Always returns >= 1.
+ *
+ * Exposed (rather than kept file-local with the pread machinery) so the
+ * fail-closed env-parse validation is unit-testable without loading an index. */
+int index_load_threads(int n_threads);
+
 class FMI_search: public indexEle
 {
     public:
