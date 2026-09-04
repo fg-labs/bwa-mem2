@@ -477,6 +477,7 @@ STANDALONE_TESTS = kswv_nrow_zero_test kswv_freed_cell_test \
                    bandedswa_high_h0_zdrop_test shm_section_find_test \
                    shm_pack_round_trip_test shm_lock_destroy_test \
                    kt_for_pool_test bns_zero_calloc_test \
+                   err_fgets_eof_test \
                    kernel_padded_lane_uninit_test bam_rec_scratch_test \
                    detect_sa_compx_test nst_nt4_decode_test \
                    read_arena_overflow_test packed_text_neg_nbases_test \
@@ -971,6 +972,11 @@ mem_gen_alt_zero_calloc_test: $(BWA_LIB) $(HTS_LIB) $(LIBSAIS_OBJS) test/mem_gen
 test/mem_gen_alt_zero_calloc_test.o: test/mem_gen_alt_zero_calloc_test.cpp
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $(DEPFLAGS) $< -o $@
 
+# err_fgets must name EOF as EOF, not a stale strerror. Links libbwa for
+# err_fgets / _err_fatal_simple; forked child captures the abort diagnostic.
+err_fgets_eof_test: $(BWA_LIB) $(HTS_LIB) $(LIBSAIS_OBJS) test/err_fgets_eof_test.o
+	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $(LDFLAGS) test/err_fgets_eof_test.o $(BWA_LIB) $(LIBSAIS_OBJS) $(LIBS) -o $@
+
 # fast_reader is C (not C++); the implicit .c rule omits $(INCLUDES), so give
 # these objects explicit rules carrying the project include paths (incl.
 # libdeflate) and preprocessor defines.
@@ -1161,6 +1167,9 @@ bam_rec_scratch_test: test/bam_rec_scratch_test.o
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $(LDFLAGS) test/bam_rec_scratch_test.o -o $@
 
 test/bam_rec_scratch_test.o: test/bam_rec_scratch_test.cpp
+	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $(DEPFLAGS) $< -o $@
+
+test/err_fgets_eof_test.o: test/err_fgets_eof_test.cpp
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $(DEPFLAGS) $< -o $@
 
 # Archive both the baseline (unmangled) kernel objects from $(OBJS) and the
