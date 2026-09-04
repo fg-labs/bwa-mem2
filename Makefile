@@ -482,7 +482,8 @@ STANDALONE_TESTS = kswv_nrow_zero_test kswv_freed_cell_test \
                    read_arena_overflow_test packed_text_neg_nbases_test \
                    packed_text_overflow_nbases_test \
                    mem_gen_alt_zero_calloc_test srtgg_grow_multi_test \
-                   kopen_pipe_status_test cli_arg_safety_test
+                   kopen_pipe_status_test cli_arg_safety_test \
+                   pwrite_all_status_test
 STANDALONE_TEST_OBJS = $(STANDALONE_TESTS:%=test/%.o)
 
 # shm_pack_round_trip_test is excluded from `test:` because it runs via
@@ -931,6 +932,10 @@ kopen_pipe_status_test: $(BWA_LIB) $(HTS_LIB) test/kopen_pipe_status_test.o
 cli_arg_safety_test: $(BWA_LIB) $(HTS_LIB) test/cli_arg_safety_test.o
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $(LDFLAGS) test/cli_arg_safety_test.o $(BWA_LIB) $(LIBS) -o $@
 
+# pwrite_all_status_test: header-only io_utils.h contract; links libbwa for err_fatal.
+pwrite_all_status_test: $(BWA_LIB) $(HTS_LIB) test/pwrite_all_status_test.o
+	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $(LDFLAGS) test/pwrite_all_status_test.o $(BWA_LIB) $(LIBS) -o $@
+
 # Standalone on purpose: it defines its own calloc so a zero-size request can
 # return NULL, and that interposition must not reach any other test. See the
 # header comment in the source.
@@ -1178,6 +1183,9 @@ test/kopen_pipe_status_test.o: test/kopen_pipe_status_test.cpp
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $(DEPFLAGS) $< -o $@
 
 test/cli_arg_safety_test.o: test/cli_arg_safety_test.cpp
+	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $(DEPFLAGS) $< -o $@
+
+test/pwrite_all_status_test.o: test/pwrite_all_status_test.cpp
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $(DEPFLAGS) $< -o $@
 
 test/bns_zero_calloc_test.o: test/bns_zero_calloc_test.cpp

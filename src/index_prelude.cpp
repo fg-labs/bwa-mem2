@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
+#include <atomic>
 #include <vector>
 
 // Forward-declare the two OpenMP runtime entry points we actually call,
@@ -46,6 +47,12 @@ int emit_0123(const PackedText& pac, const char* prefix, int num_threads)
     // OS threads are created.
     constexpr size_t kEmitChunk = 64 * 1024;
 
+    // Capture the first write failure inside the OpenMP region and report it
+    // AFTER the region: pwrite_all's err_fatal()->exit() would tear down libomp
+    // while sibling threads are still mid-loop (hang/UB). Mirrors the
+    // capture-then-fatal pattern in libsais_build.cpp's unpack loop.
+    std::atomic<int>       io_errno{0};
+    std::atomic<long long> io_off{-1};
 #ifdef _OPENMP
     #pragma omp parallel num_threads(num_threads)
 #endif
@@ -63,10 +70,25 @@ int emit_0123(const PackedText& pac, const char* prefix, int num_threads)
         while (off < e) {
             size_t n = (size_t)std::min<int64_t>(e - off, (int64_t)kEmitChunk);
             for (size_t k = 0; k < n; ++k) thr_buf[k] = pac.get_base(off + (int64_t)k);
-            pwrite_all(fd, thr_buf.data(), n, off, "emit_0123");
+            int rc = pwrite_all_status(fd, thr_buf.data(), n, off);
+            if (rc != 0) {
+                int expect = 0;
+                if (io_errno.compare_exchange_strong(expect, rc)) io_off.store((long long)off);
+                break;  // stop this thread; the region ends, then we err_fatal
+            }
             off += (int64_t)n;
         }
     }
+    // Report the captured failure outside the region. `off` is the failing
+    // chunk's start (pwrite_all_status advances internally), so "at or after".
+    // rc < 0 is a pwrite-returned-0; rc > 0 is an errno.
+    int io_rc = io_errno.load();
+    if (io_rc < 0)
+        err_fatal(__func__, "pwrite('%s') returned 0 at or after offset %lld",
+                  out.c_str(), io_off.load());
+    else if (io_rc > 0)
+        err_fatal(__func__, "pwrite('%s') failed at or after offset %lld: %s",
+                  out.c_str(), io_off.load(), strerror(io_rc));
     // Surface deferred I/O errors (delayed-writeback EIO, full filesystem,
     // etc.) so a truncated .0123 never masquerades as complete. This runs only
     // when the caller opted into emitting .0123 (off by default; `mem`

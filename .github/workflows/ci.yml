@@ -583,6 +583,30 @@ jobs:
           make -C test header_insert_test CXX=${{ matrix.cxx || 'clang++-19' }}
           ./test/header_insert_test
 
+      - name: pwrite_all_status write-the-whole-buffer contract
+        # Header-only io_utils.h core shared by pwrite_all (fatal) and the
+        # emit_0123 OpenMP-region caller: a good write returns 0 and lands the
+        # bytes, a bad fd returns a positive errno (not a crash/exit), and the
+        # small-max_chunk path splits and still writes the whole buffer.
+        #
+        # The test TU itself is arch-independent, but it links libbwa.a, so this
+        # invocation must carry the row's arch/CXX/USE_MIMALLOC exactly as the
+        # main build did -- otherwise the build-flags stamp (which keys on the
+        # arch flags and CPPFLAGS' -DUSE_MIMALLOC) differs from the main build's,
+        # rebuilding libbwa.a at the default SSE4.1/mimalloc flags. That in turn
+        # marks the already-linked doctest unit binary stale, so a later bare
+        # `make` in test/run_unit_tests.sh relinks it without $(HTSLIB_static_LIBS)
+        # and fails on htslib's unresolved libdeflate_* symbols.
+        run: |
+          if [ "${{ matrix.arch_flag }}" = "" ]; then
+            make pwrite_all_status_test arch=${{ matrix.baseline_arch || 'avx2' }} \
+              CXX=${{ matrix.cxx || 'clang++-19' }} USE_MIMALLOC=${{ matrix.use_mimalloc }}
+          else
+            make pwrite_all_status_test arch=${{ matrix.arch_flag }} \
+              CXX=${{ matrix.cxx || 'clang++-19' }} USE_MIMALLOC=${{ matrix.use_mimalloc }}
+          fi
+          ./pwrite_all_status_test
+
       - name: Run integration tests
         if: matrix.run_integration == true
         env:
