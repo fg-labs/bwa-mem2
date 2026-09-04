@@ -109,9 +109,6 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
 #  define MEM_RESCUE_SKIP_FRAC 0.33
 #endif
 
-struct __smem_i;
-typedef struct __smem_i smem_i;
-
 #define MEM_F_PE        0x2
 #define MEM_F_NOPAIRING 0x4
 #define MEM_F_ALL       0x8
@@ -591,12 +588,6 @@ static inline int mem_opt_records_are_bam(const mem_opt_t *opt) {
 
 
 typedef kvec_t(int) int_v;
-
-smem_i *smem_itr_init(const bwt_t *bwt);
-void smem_itr_destroy(smem_i *itr);
-void smem_set_query(smem_i *itr, int len, const uint8_t *query);
-void smem_config(smem_i *itr, int min_intv, int max_len, uint64_t max_intv);
-const bwtintv_v *smem_next(smem_i *itr);
 
 mem_opt_t *mem_opt_init(void);
 void mem_fill_scmat(int a, int b, int8_t mat[25]);

@@ -36,9 +36,6 @@
 #include <string.h>
 #include <stdint.h>
 
-#if AFF && (__linux__)
-extern int affy[256];
-#endif
 
 /* Apple Silicon QoS (Quality of Service) support
  * This helps the scheduler preferentially place compute threads on P-cores
@@ -96,13 +93,9 @@ static inline long steal_work(kt_for_t *t)
 static void ktf_run(ktf_worker_t *w)
 {
 	long i;
-	int tid = w->i;
 	double _c0 = sp_enabled() ? sp_thread_cpu() : 0.0;
 	if (sp_enabled()) sp_encode_reset();
 
-#if AFF && (__linux__)
-	fprintf(stderr, "i: %d, CPU: %d\n", tid , sched_getcpu());
-#endif
 
 	for (;;) {
 		i = __sync_fetch_and_add(&w->i, w->t->n_threads);
@@ -203,12 +196,6 @@ static void kt_pool_init(int n_threads)
 		pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INITIATED, 0);
 #endif
 	for (int i = 0; i < n_threads; ++i) {
-#if AFF && (__linux__)
-		cpu_set_t cpus;
-		CPU_ZERO(&cpus);
-		CPU_SET(affy[i], &cpus);
-		pthread_attr_setaffinity_np(&attr, sizeof(cpu_set_t), &cpus);
-#endif
 		/* A failed worker would leave kt_for() waiting on cv_done for a
 		 * completion that never arrives (deadlock), so fail loudly instead.
 		 * pthread_create() returns the error code directly rather than via
