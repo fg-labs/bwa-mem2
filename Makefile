@@ -482,7 +482,7 @@ STANDALONE_TESTS = kswv_nrow_zero_test kswv_freed_cell_test \
                    read_arena_overflow_test packed_text_neg_nbases_test \
                    packed_text_overflow_nbases_test \
                    mem_gen_alt_zero_calloc_test srtgg_grow_multi_test \
-                   kopen_pipe_status_test
+                   kopen_pipe_status_test cli_arg_safety_test
 STANDALONE_TEST_OBJS = $(STANDALONE_TESTS:%=test/%.o)
 
 # shm_pack_round_trip_test is excluded from `test:` because it runs via
@@ -926,6 +926,11 @@ srtgg_grow_multi_test: $(BWA_LIB) $(HTS_LIB) $(LIBSAIS_OBJS) test/srtgg_grow_mul
 kopen_pipe_status_test: $(BWA_LIB) $(HTS_LIB) test/kopen_pipe_status_test.o
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $(LDFLAGS) test/kopen_pipe_status_test.o $(BWA_LIB) $(LIBS) -o $@
 
+# cli_arg_safety_test links libbwa.a for bwa_insert_header/bwa_escape and
+# bseq_classify; exercises -R/-H escape and the -p empty-batch path. No arch.
+cli_arg_safety_test: $(BWA_LIB) $(HTS_LIB) test/cli_arg_safety_test.o
+	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $(LDFLAGS) test/cli_arg_safety_test.o $(BWA_LIB) $(LIBS) -o $@
+
 # Standalone on purpose: it defines its own calloc so a zero-size request can
 # return NULL, and that interposition must not reach any other test. See the
 # header comment in the source.
@@ -944,7 +949,7 @@ smoke: fmi_seed_api_smoke
 fmi_seed_api_smoke: $(BWA_LIB) $(HTS_LIB) $(LIBSAIS_OBJS) $(if $(filter 1,$(USE_MIMALLOC)),$(MIMALLOC_LIB)) test/fmi_seed_api_smoke.o
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) $(LDFLAGS) test/fmi_seed_api_smoke.o $(BWA_LIB) $(LIBSAIS_OBJS) $(LIBS) $(MIMALLOC_LDFLAGS) -o $@
 
-test/fmi_seed_api_smoke.o: test/fmi_seed_api_smoke.cpp
+test/fmi_seed_api_smoke.o: test/fmi_seed_api_smoke.cpp $(FLAGS_STAMP)
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $(DEPFLAGS) $< -o $@
 
 # Regression test for the fmi_seed_api.h facade's max_occ guard: forwarding
@@ -1170,6 +1175,9 @@ test/srtgg_grow_multi_test.o: test/srtgg_grow_multi_test.cpp
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $(DEPFLAGS) $< -o $@
 
 test/kopen_pipe_status_test.o: test/kopen_pipe_status_test.cpp
+	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $(DEPFLAGS) $< -o $@
+
+test/cli_arg_safety_test.o: test/cli_arg_safety_test.cpp
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $(DEPFLAGS) $< -o $@
 
 test/bns_zero_calloc_test.o: test/bns_zero_calloc_test.cpp

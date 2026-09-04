@@ -62,6 +62,11 @@ trap 'rm -f "$sam" "$err"' EXIT
 assert_pg_well_formed() {
     local label="$1"
     local rg="$2"
+    # Optional: the exact sanitized -R token expected to survive intact inside
+    # the CL: value (tabs collapsed to single spaces by append_pg_cl_sanitized).
+    # When set, assert the whole token is present, not just the structural and
+    # trailing-token checks below.
+    local expected_token="${3:-}"
 
     "$bin" mem -R "$rg" "$ref" "$reads" > "$sam" 2> "$err" || {
         echo "FAIL [$label]: bwa-mem3 mem exited non-zero" >&2
@@ -130,6 +135,18 @@ assert_pg_well_formed() {
         echo "FAIL [$label]: CL: value contains a literal carriage return" >&2
         exit 1
     fi
+
+    # When an expected sanitized token is supplied, assert it appears verbatim
+    # in the CL: value. The trailing-token and no-tab checks above still pass on
+    # a value whose SM: field was silently truncated (later argv tokens follow
+    # the -R value), so a growth-math bug can corrupt the token without tripping
+    # them — this substring check is what actually catches it.
+    if [[ -n "$expected_token" && "$cl_value" != *"$expected_token"* ]]; then
+        echo "FAIL [$label]: CL: value does not contain expected -R token" >&2
+        echo "expected substring: $expected_token" >&2
+        echo "CL: was: $cl_value" >&2
+        exit 1
+    fi
 }
 
 # --- @PG checks: embed each whitespace variant in -R and verify CL: clean -
@@ -139,6 +156,17 @@ assert_pg_well_formed() {
 assert_pg_well_formed "tab" $'@RG\tID:x\tSM:y\tLB:z'
 assert_pg_well_formed "newline" $'@RG\tID:x\tSM:y\tLB:z\nTRAIL'
 assert_pg_well_formed "carriage-return" $'@RG\tID:x\tSM:y\tLB:z\rTRAIL'
+
+# A long -R value drives the @PG CL: kstring through many grow-and-realloc
+# cycles (append_pg_cl_sanitized calls kputc once per input byte). Regression
+# for the buffer-growth bookkeeping added alongside the CL: kstring's OOM
+# guard: assert_pg_well_formed's checks (single well-formed @PG line, no
+# leaked tab/CR, CL: ends with the reads path) still catch a growth-math bug
+# that corrupts or truncates the value.
+long_sm="$(printf 'x%.0s' $(seq 1 100000))"
+assert_pg_well_formed "long-arg-many-growths" \
+    $'@RG\tID:x\tSM:'"$long_sm"$'\tLB:z' \
+    "@RG ID:x SM:${long_sm} LB:z"
 
 # --- @RG assertions (tab-only case) ----------------------------------------
 # argv is not mutated, so the @RG line the user asked for must still be

@@ -552,6 +552,31 @@ jobs:
         # propagation is needed here.
         run: bash test/kopen_pipe_e2e_test.sh ./bwa-mem3 test/fixtures
 
+      - name: CLI -R/-H escape and -p empty-batch safety
+        # Standalone tests for two CLI-input helpers in src/bwa.cpp that the
+        # byte-identity fixtures never reach: bwa_escape (a trailing backslash
+        # in -R/-H text must not read/write past the NUL) and bseq_classify
+        # (the -p interleaved path can hand it an empty batch -> must not deref
+        # seqs[0]). Asserts against hardcoded expected strings (independent
+        # oracle). Links libbwa.a, so arch/CXX propagate like bns_zero_calloc.
+        run: |
+          if [ "${{ matrix.arch_flag }}" = "" ]; then
+            make cli_arg_safety_test arch=${{ matrix.baseline_arch || 'avx2' }} \
+              CXX=${{ matrix.cxx || 'clang++-19' }} USE_MIMALLOC=${{ matrix.use_mimalloc }}
+          else
+            make cli_arg_safety_test arch=${{ matrix.arch_flag }} CXX=${{ matrix.cxx || 'clang++-19' }} USE_MIMALLOC=${{ matrix.use_mimalloc }}
+          fi
+          ./cli_arg_safety_test
+
+      - name: -H header ingestion (seekable, non-seekable pipe, oversize)
+        # bwa_insert_header_file: covers the batched @-line assembly, the
+        # non-seekable-stream path (a pipe, where the old fseek/ftell sizing
+        # silently dropped the whole -H file), and the oversize-line fatal.
+        # Built via test/Makefile; no SIMD kernels, so no arch propagation.
+        run: |
+          make -C test header_insert_test CXX=${{ matrix.cxx || 'clang++-19' }}
+          ./test/header_insert_test
+
       - name: Run integration tests
         if: matrix.run_integration == true
         env:
@@ -1213,6 +1238,14 @@ jobs:
           BWA_MEM3="$GITHUB_WORKSPACE/bwa-mem3" \
           HEADER_PARITY_WORK_DIR=/tmp/header-parity-asan \
           bash test/regression/header_parity.sh
+          # Re-run the CLI-input safety test against the SAME asan binary. Its
+          # bwa_escape trailing-backslash cases are a heap over-read inside
+          # libbwa; on the plain (non-asan) build earlier in the row the read
+          # usually lands on allocator padding and the assertions still pass, so
+          # only asan reliably turns the OOB into a failure.
+          make ASAN=1 arch=${{ matrix.arch_flag }} \
+            CXX=${{ matrix.cxx || 'clang++-19' }} cli_arg_safety_test
+          ./cli_arg_safety_test
 
   coverage:
     name: Coverage (Linux AVX2, gcov → Codecov)

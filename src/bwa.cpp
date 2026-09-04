@@ -79,6 +79,9 @@ static inline void kseq2bseq1(const kseq_t *ks, bseq1_t *s, read_arena_t *arena)
      * so its ownership is not uniform enough to live in the arena. */
     s->name = read_arena_dup(arena, ks->name.s, ks->name.l);
     s->comment = ks->comment.l? strdup(ks->comment.s) : 0;
+    // A NULL from OOM here would be read as "no comment" and silently drop the
+    // comment under -C; fail loudly instead.
+    if (ks->comment.l) xassert(s->comment != NULL, "out of memory: comment");
     s->seq = read_arena_dup(arena, ks->seq.s, ks->seq.l);
     s->qual = ks->qual.l? read_arena_dup(arena, ks->qual.s, ks->qual.l) : 0;
     s->l_seq = strlen(s->seq);
@@ -200,15 +203,28 @@ bseq1_t *bseq_read_orig(int64_t chunk_size, int *n_, void *ks1_, void *ks2_, int
      * arena whose lifetime spans them all. */
     const int arena_created_here = (*arena_out == NULL);
     read_arena_t *arena = arena_created_here ? read_arena_create() : *arena_out;
-    while (kseq_read(ks) >= 0)
+    int r1;
+    // kseq_read returns -1 at EOF but < -1 (e.g. -2) for a truncated record or a
+    // seq/qual length mismatch. Fail loudly on that, matching the default reader
+    // (bseq_read_fast, fixed in the same change), or --legacy-reader silently
+    // truncates a corrupt input and exits 0.
+    while ((r1 = kseq_read(ks)) >= 0)
     {
-        if (ks2 && kseq_read(ks2) < 0) { // the 2nd file has fewer reads
-            fprintf(stderr, "[W::%s] the 2nd file has fewer sequences.\n", __func__);
-            break;
+        if (ks2) {
+            int r2 = kseq_read(ks2);
+            if (r2 < -1)
+                err_fatal(__func__, "malformed FASTQ record or read/decode error in the 2nd input (record %ld)", (long)n);
+            if (r2 < 0) { // -1 EOF: the 2nd file has fewer reads
+                fprintf(stderr, "[W::%s] the 2nd file has fewer sequences.\n", __func__);
+                break;
+            }
         }
         if (n >= m) {
+            bseq1_t *tmp;
             m = m? m<<1 : 256;
-            seqs = (bseq1_t*) realloc(seqs, m * sizeof(bseq1_t));
+            tmp = (bseq1_t*) realloc(seqs, m * sizeof(bseq1_t));
+            xassert(tmp != NULL, "out of memory: seqs");
+            seqs = tmp;
         }
         trim_readno(&ks->name);
         kseq2bseq1(ks, &seqs[n], arena);
@@ -233,9 +249,18 @@ bseq1_t *bseq_read_orig(int64_t chunk_size, int *n_, void *ks1_, void *ks2_, int
         //  break;
         // }
     }
+    // The loop exits on r1 < 0; distinguish EOF (-1) from a malformed 1st-input
+    // record (< -1) so truncated input fails loudly instead of ending at exit 0.
+    if (r1 < -1)
+        err_fatal(__func__, "malformed FASTQ record or read/decode error in the 1st input (record %ld)", (long)n);
     if (size == 0) { // test if the 2nd file is finished
-        if (ks2 && kseq_read(ks2) >= 0)
-            fprintf(stderr, "[W::%s] the 1st file has fewer sequences.\n", __func__);
+        if (ks2) {
+            int r2 = kseq_read(ks2);
+            if (r2 < -1)
+                err_fatal(__func__, "malformed FASTQ record or read/decode error in the 2nd input (record %ld)", (long)n);
+            if (r2 >= 0)
+                fprintf(stderr, "[W::%s] the 1st file has fewer sequences.\n", __func__);
+        }
     }
     /* PIPE-F6: see bseq_read above — hand off, or free the empty arena at EOF,
      * but only when this call created it. */
@@ -259,6 +284,10 @@ void bseq_classify(int n, bseq1_t *seqs, int m[2], bseq1_t *sep[2])
 {
     int i, has_last;
     kvec_t(bseq1_t) a[2] = {{0,0,0}, {0,0,0}};
+    // An empty batch (reachable via the -p interleaved path when input ends on
+    // a cohort-slice boundary) must not fall through to kv_push(..., seqs[i-1])
+    // with i == 1 on a NULL seqs.
+    if (n <= 0) { m[0] = m[1] = 0; sep[0] = sep[1] = NULL; return; }
     for (i = 1, has_last = 1; i < n; ++i) {
         if (has_last) {
             if (strcmp(seqs[i].name, seqs[i-1].name) == 0) {
@@ -850,6 +879,7 @@ void bwa_warn_sidecar_missing_AH(const bntseq_t *bns, const char *idx_hdr_lines,
         if (!bns->anns[i].is_alt) continue;
         int absent;
         khiter_t k = kh_put(sqname, alt, bns->anns[i].name, &absent);
+        if (absent < 0) continue;        /* kh_resize failed: skip, don't write past vals */
         kh_val(alt, k) = i;              /* recover the stable name below */
     }
     if (kh_size(alt) == 0) { kh_destroy(sqname, alt); return; }
@@ -901,8 +931,8 @@ void bwa_warn_sidecar_missing_AH(const bntseq_t *bns, const char *idx_hdr_lines,
     if (n_missing == 0) return;
     const char *first = bns->anns[first_id].name;
     fprintf(stderr,
-            "[W::%s] the index marks %d contig%s as ALT (e.g. %s) but the "
-            "<prefix>.hdr / <baseprefix>.dict sidecar supplies @SQ without an AH tag; "
+            "[W::%s] the <prefix>.hdr / <baseprefix>.dict sidecar supplies @SQ "
+            "without an AH tag for %d of the index's ALT contig%s (e.g. %s); "
             "ALT status will be absent from the output header. The sidecar's @SQ is "
             "authoritative and is not modified. Regenerate it with the ALT list:\n"
             "[W::%s]   samtools dict --alt %s.alt -o <sidecar> %s\n",
@@ -985,7 +1015,8 @@ static void print_sam_hdr(const bntseq_t *bns, const char *bns_hdr,
 }
 
 // Load the contents of `<prefix>.hdr` if present, else `<baseprefix>.dict`
-// (where baseprefix strips a trailing .fa/.fna/.fasta, optionally .gz), into
+// (where baseprefix drops a trailing ".gz" then the final dotted suffix of the
+// basename, whatever it is -- e.g. foo.fa -> foo, GRCh38.p14 -> GRCh38), into
 // a newly-allocated, newline-separated but not newline-terminated string.
 // Returns NULL if neither file exists (or is empty). Caller owns the result
 // and must free() it.
@@ -1057,10 +1088,14 @@ static char *bwa_escape(char *s)
     for (p = q = s; *p; ++p) {
         if (*p == '\\') {
             ++p;
-            if (*p == 't') *q++ = '\t';
+            // A trailing backslash has no escape char after it: stop before the
+            // for-loop's ++p walks past the NUL and copies/writes out of bounds.
+            if (*p == '\0') break;
+            else if (*p == 't') *q++ = '\t';
             else if (*p == 'n') *q++ = '\n';
             else if (*p == 'r') *q++ = '\r';
             else if (*p == '\\') *q++ = '\\';
+            // (an unrecognized escape is dropped, unchanged behavior)
         } else *q++ = *p;
     }
     *q = '\0';
@@ -1076,6 +1111,7 @@ char *bwa_set_rg(const char *s)
         goto err_set_rg;
     }
     rg_line = strdup(s);
+    xassert(rg_line != NULL, "out of memory: rg_line");  // bwa_escape derefs it
     bwa_escape(rg_line);
     if ((p = strstr(rg_line, "\tID:")) == 0) {
         if (bwa_verbose >= 1) fprintf(stderr, "[E::%s] no ID at the read group line\n", __func__);
@@ -1096,74 +1132,122 @@ err_set_rg:
     return 0;
 }
 
-char *bwa_insert_header(const char *s, char *hdr)
+// Append `s` to `hdr`, separated by '\n' when `hdr` already holds a prior
+// record, WITHOUT touching bwa_escape. Shared by bwa_insert_header (which
+// escapes the freshly-joined segment once, immediately after joining) and
+// bwa_insert_header_file (which escapes each retained line individually
+// before ever reaching this join -- see the comment on that function for why
+// that order matters). `*start` receives the offset of the freshly-appended
+// segment within the returned buffer, mirroring the accounting bwa_escape
+// needs; pass NULL when the caller has no further use for it.
+static char *bwa_join_header(const char *s, char *hdr, int *start)
 {
     int len = 0;
-    if (s == 0 || s[0] != '@') return hdr;
     if (hdr) {
         len = strlen(hdr);
         int len_s = strlen(s);
-        hdr = (char*) realloc(hdr, len + len_s + 2);
+        char *tmp = (char*) realloc(hdr, len + len_s + 2);
+        xassert(tmp != NULL, "out of memory: hdr");  // don't leak/dangle hdr on failure
+        hdr = tmp;
         hdr[len++] = '\n';
         strcpy(hdr + len, s);
     } else hdr = strdup(s);
-    bwa_escape(hdr + len);
+    xassert(hdr != NULL, "out of memory: hdr");
+    if (start) *start = len;
+    return hdr;
+}
+
+char *bwa_insert_header(const char *s, char *hdr)
+{
+    if (s == 0 || s[0] != '@') return hdr;
+    int start = 0;
+    hdr = bwa_join_header(s, hdr, &start);
+    bwa_escape(hdr + start);  // bwa_escape derefs hdr; bwa_join_header already xassert'd it
     return hdr;
 }
 
 char *bwa_insert_header_file(FILE *fp, char *hdr)
 {
-    // Batched counterpart to bwa_insert_header: copy every @-prefixed line
-    // from fp into a single buffer, then call bwa_insert_header once on the
-    // whole thing. The per-line loop in fastmap.cpp was O(n^2) because
-    // bwa_insert_header strlen's and realloc's hdr on every call — this
-    // makes ingestion of large (~70 MB, ~1.5 M-line) headers linear.
+    // Batched counterpart to bwa_insert_header: copy every @-prefixed line from
+    // fp into a single buffer, then call bwa_insert_header once on the whole
+    // thing. The per-line loop in fastmap.cpp was O(n^2) because
+    // bwa_insert_header strlen's and realloc's hdr on every call — this makes
+    // ingestion of large (~70 MB, ~1.5 M-line) headers linear.
     //
-    // Semantics match the old loop: non-@ lines are dropped; bwa_escape is
-    // applied to the assembled string (equivalent to per-line because
-    // bwa_escape only rewrites backslash-escape pairs and copies every other
-    // byte through).
-    long file_size;
-    if (fseek(fp, 0L, SEEK_END) != 0) return hdr;
-    file_size = ftell(fp);
-    rewind(fp);
-    if (file_size <= 0) return hdr;
-
-    char *buf = (char *) calloc(1, (size_t) file_size + 1);
-    xassert(buf != NULL, "out of memory: buf");
-    char *p = buf;
-    // Budget for the per-call fgets: use LINE_MAX'ish 64 KiB minus 1 to
-    // match the pre-patch loop. Bound each read by the remaining buffer so
-    // a pathologically long line cannot overrun the file-sized allocation.
-    while (1) {
-        long remaining = (buf + file_size + 1) - p;
-        if (remaining <= 1) break;
-        int cap = (remaining > 0xffff) ? 0xffff : (int) remaining;
-        if (fgets(p, cap, fp) == NULL) break;
-        size_t i = strlen(p);
-        // If we hit the 64 KiB per-call budget without seeing a newline,
-        // the line is too long to fit in one fgets call. The next chunk
-        // would not start with '@' and would be silently dropped,
-        // truncating the line. Match the pre-patch assert(buf[i-1] ==
-        // '\n') behavior and fail loudly. (We only check this when cap
-        // was bounded by the 0xffff budget, not when it was bounded by
-        // the remaining buffer — the latter case is the legitimate
-        // no-trailing-newline-on-last-line scenario.)
-        if (cap >= 0xffff && i > 0 && p[i - 1] != '\n') {
-            err_fatal(__func__, "header line exceeds %d-byte read budget", cap - 1);
+    // Reads line by line into an explicit growable buffer rather than sizing it
+    // with fseek/ftell: the latter returns -1 on a non-seekable stream (a pipe,
+    // /dev/stdin, or `-H <(...)` process substitution), and the old code then
+    // silently discarded the entire -H file. Every realloc is xassert'd so an
+    // OOM fails with a diagnostic rather than a NULL write (a raw kstring append
+    // would not check). fgets reads at most sizeof(chunk)-1 bytes; a chunk that
+    // fills to that bound without a newline while more input remains is a single
+    // header line longer than the budget -- rejected (matching the prior
+    // contract), and keyed on the filled-budget condition rather than a running
+    // byte count so it no longer false-fires on a short unterminated final line.
+    //
+    // Semantics match the old loop: non-@ lines are dropped; kept @-lines are
+    // joined by '\n' with no trailing newline.
+    //
+    // Each retained line is escaped in place as soon as it is complete, BEFORE
+    // any later line's '\n' separator is appended after it, and the final
+    // buffer is joined onto `hdr` with bwa_join_header (which does not
+    // escape). Escaping the whole concatenation in one pass instead (as a
+    // single bwa_insert_header call on `buf`) is NOT equivalent to per-line
+    // escaping: a retained line ending in an odd number of backslashes has an
+    // incomplete escape sequence at its tail, and bwa_escape doesn't know
+    // about line boundaries -- it would consume the very next byte it sees as
+    // the second half of that sequence. If that next byte is the '\n'
+    // separator we inserted, the separator is silently dropped (or
+    // mistranslated) and two SAM header records get merged into one line.
+    // Escaping each line the moment it is complete -- exactly when the
+    // per-line baseline would have escaped it -- means bwa_escape never sees
+    // a byte beyond the line it's escaping.
+    size_t cap = 0x10000, len = 0;
+    char *buf = (char *) malloc(cap);
+    xassert(buf != NULL, "out of memory: header buffer");
+    char chunk[0x10000];
+    int at_line_start = 1;    // is the next fgets result the start of a new line?
+    int keep = 0;             // are we inside an @-line being kept?
+    size_t line_start = 0;    // offset in buf where the current line's raw content begins
+    while (fgets(chunk, sizeof chunk, fp) != NULL) {
+        int clen = (int) strlen(chunk);
+        int has_nl = (clen > 0 && chunk[clen - 1] == '\n');
+        if (!has_nl && clen == (int)(sizeof chunk) - 1 && !feof(fp))
+            err_fatal(__func__, "header line exceeds %d-byte budget", (int)(sizeof chunk) - 1);
+        if (at_line_start) keep = (chunk[0] == '@');  // decide once, at the line's first chunk
+        if (keep) {
+            int add = has_nl ? clen - 1 : clen;         // content without the trailing '\n'
+            int sep = (len > 0 && at_line_start) ? 1 : 0;  // separator before a new kept line
+            if (len + (size_t)sep + (size_t)add + 1 > cap) {
+                while (len + (size_t)sep + (size_t)add + 1 > cap) cap <<= 1;
+                char *tmp = (char *) realloc(buf, cap);
+                xassert(tmp != NULL, "out of memory: header buffer");
+                buf = tmp;
+            }
+            if (sep) buf[len++] = '\n';
+            if (at_line_start) line_start = len;  // this chunk starts a new retained line
+            memcpy(buf + len, chunk, add);
+            len += add;
+            if (has_nl) {
+                // The line is complete -- escape it now, before a later
+                // line's separator can be appended right after it.
+                buf[len] = '\0';
+                bwa_escape(buf + line_start);
+                len = line_start + strlen(buf + line_start);
+            }
         }
-        if (p[0] == '@') {
-            // bwa_insert_header strips the trailing '\n' from its input
-            // before concatenating, so preserving the newline here is what
-            // produces the between-line separator in the assembled buffer.
-            // Lines without a trailing newline (last line of a file that
-            // lacks one) are kept as-is; the final p[-1] fixup below only
-            // triggers when the final byte we wrote is '\n'.
-            p += i;
-        }
+        at_line_start = has_nl;  // a continuation chunk (no newline yet) is not a new line
     }
-    if (p != buf && p[-1] == '\n') p[-1] = '\0';
-    hdr = bwa_insert_header(buf, hdr);
+    if (keep && !at_line_start) {
+        // The file ended without a trailing newline on the last retained
+        // line, so the has_nl branch above never got to escape it.
+        buf[len] = '\0';
+        bwa_escape(buf + line_start);
+        len = line_start + strlen(buf + line_start);
+    }
+    if (len == 0) { free(buf); return hdr; }
+    buf[len] = '\0';
+    hdr = bwa_join_header(buf, hdr, NULL);
     free(buf);
     return hdr;
 }
