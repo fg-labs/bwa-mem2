@@ -384,6 +384,12 @@ jobs:
       - name: Version banner regression
         run: BWA_MEM3=./bwa-mem3 EXPECTED_FLOOR=${{ matrix.arch_flag }} bash test/regression/version_banner.sh
 
+      - name: Argument range validation (-E / -I reject non-positive)
+        # -E 0 (cal_max_gap divide-by-zero, arch-divergent UB) and -I mean,0
+        # (mem_pair divide-by-zero, NaN pairing collapse) must be rejected at
+        # parse with an ERROR: message rather than silently mis-aligning.
+        run: BWA_MEM3=./bwa-mem3 bash test/regression/arg_range_validation.sh
+
       - name: Build doctest framework and unit binary
         # Invoke via the parent `test-binaries` target so ARCH_FLAGS
         # propagate from libbwa.a's build into the test CXXFLAGS. Ensures

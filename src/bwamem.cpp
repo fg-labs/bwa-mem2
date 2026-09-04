@@ -509,8 +509,14 @@ int mem_band_cert_params_safe(const mem_opt_t *opt) {
 
 static inline int cal_max_gap(const mem_opt_t *opt, int qlen)
 {
-    int l_del = (int)((double)(qlen * opt->a - opt->o_del) / opt->e_del + 1.);
-    int l_ins = (int)((double)(qlen * opt->a - opt->o_ins) / opt->e_ins + 1.);
+    // Guard a zero gap-extension penalty: the double/int divide would be
+    // inf/NaN and the (int) cast is UB (arch-divergent: INT_MIN on x86-64,
+    // saturate on aarch64), giving different seed windows for the same command
+    // line. Treat a non-positive penalty as an unbounded gap (opt->w<<1, the
+    // clamp below), matching band_cert_ok / mem_band_cert_params_safe_w. -E is
+    // also rejected at parse (fastmap.cpp); this is defense in depth.
+    int l_del = opt->e_del > 0 ? (int)((double)(qlen * opt->a - opt->o_del) / opt->e_del + 1.) : opt->w<<1;
+    int l_ins = opt->e_ins > 0 ? (int)((double)(qlen * opt->a - opt->o_ins) / opt->e_ins + 1.) : opt->w<<1;
     //int l_del = (int)((double)(qlen * opt->a - opt->o_del) + 1.);
     //int l_ins = (int)((double)(qlen * opt->a - opt->o_ins) + 1.);
 
