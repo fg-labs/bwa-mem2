@@ -453,13 +453,11 @@ static inline void kswv_u8_saturation_guard(const SeqPair *p, int8_t w_match, ui
             "forms would diverge -- the 16-bit tier must handle this score range");
 }
 
-/*******************************************************************************
- * ARM/NEON Implementation
- * Native NEON for 128-bit vectors (16 x 8-bit or 8 x 16-bit elements)
- * This provides optimized SIMD on Apple Silicon where sse2neon can't help
- * (AVX-512 has no sse2neon translation)
- ******************************************************************************/
 #if defined(__ARM_NEON) || defined(__aarch64__) || defined(APPLE_SILICON)
+
+/* NEON SoA pack helpers (neon_transpose* / neon_soa_pack*) live in a shared
+ * header so the u8 and 16-bit builds converge on one copy. */
+#include "neon_soa_pack.h"
 
 void kswv::getScores8(SeqPair *pairArray,
                       uint8_t *seqBufRef,
@@ -514,70 +512,42 @@ void kswv::kswvBatchWrapper8(SeqPair *pairArray,
         uint16_t tid = 0;   // forcing single thread
         uint8_t *mySeq1SoA = seq1SoA + tid * this->maxRefLen * SIMD_WIDTH8;
         uint8_t *mySeq2SoA = seq2SoA + tid * this->maxQerLen * SIMD_WIDTH8;
-        uint8_t *seq1;
-        uint8_t *seq2;
-
         int nstart = 0, nend = numPairs;
 
         for (i = nstart; i < nend; i += SIMD_WIDTH8)
         {
-            int32_t j, k;
+            /* Gather the group's lane geometry once, then build both SoA
+             * buffers with the tiled transpose (neon_soa_pack16). Reference:
+             * bases then 0xFF from len1 through row maxLen1 inclusive; the old
+             * (seq1[k] == AMBIG_ ? AMBR : seq1[k]) remap was the identity
+             * (AMBIG_ == AMBR == 4) and is gone. Query: bases (N: 4 -> AMBQ),
+             * NEON_QPAD8 on [len2, quantum), 0xFF from the quantum through
+             * column maxLen2 inclusive -- the fill contract at the top of
+             * this file. */
+            const uint8_t *seq1p[SIMD_WIDTH8], *seq2p[SIMD_WIDTH8];
+            int len1a[SIMD_WIDTH8], len2a[SIMD_WIDTH8], quant[SIMD_WIDTH8];
             int maxLen1 = 0;
             int maxLen2 = 0;
-
-            for (j = 0; j < SIMD_WIDTH8; j++)
+            for (int j = 0; j < SIMD_WIDTH8; j++)
             {
-                SeqPair sp = pairArray[i + j];
+                const SeqPair &sp = pairArray[i + j];
 #if MAINY
-                seq1 = seqBufRef + (int64_t)sp.id * this->maxRefLen;
+                seq1p[j] = seqBufRef + (int64_t)sp.id * this->maxRefLen;
+                seq2p[j] = seqBufQer + (int64_t)sp.id * this->maxQerLen;
 #else
-                seq1 = seqBufRef + sp.idr;
+                seq1p[j] = seqBufRef + sp.idr;
+                seq2p[j] = seqBufQer + sp.idq;
 #endif
-                for (k = 0; k < sp.len1; k++)
-                {
-                    mySeq1SoA[k * SIMD_WIDTH8 + j] = (seq1[k] == AMBIG_ ? AMBR : seq1[k]);
-                }
+                len1a[j] = sp.len1;
+                len2a[j] = sp.len2;
+                quant[j] = query_quantum8(sp.len2);
                 if (maxLen1 < sp.len1) maxLen1 = sp.len1;
+                if (maxLen2 < quant[j]) maxLen2 = quant[j];
             }
-            for (j = 0; j < SIMD_WIDTH8; j++)
-            {
-                SeqPair sp = pairArray[i + j];
-                for (k = sp.len1; k <= maxLen1; k++)
-                {
-                    mySeq1SoA[k * SIMD_WIDTH8 + j] = 0xFF;
-                }
-            }
-
-            for (j = 0; j < SIMD_WIDTH8; j++)
-            {
-                SeqPair sp = pairArray[i + j];
-#if MAINY
-                seq2 = seqBufQer + (int64_t)sp.id * this->maxQerLen;
-#else
-                seq2 = seqBufQer + sp.idq;
-#endif
-                int quanta = query_quantum8(sp.len2);
-                for (k = 0; k < sp.len2; k++)
-                {
-                    mySeq2SoA[k * SIMD_WIDTH8 + j] = (seq2[k] == AMBIG_ ? AMBQ : seq2[k]);
-                }
-
-                for (k = sp.len2; k < quanta; k++)
-                {
-                    mySeq2SoA[k * SIMD_WIDTH8 + j] = NEON_QPAD8;
-                }
-                if (maxLen2 < quanta) maxLen2 = quanta;
-            }
-
-            for (j = 0; j < SIMD_WIDTH8; j++)
-            {
-                SeqPair sp = pairArray[i + j];
-                int quanta = query_quantum8(sp.len2);
-                for (k = quanta; k <= maxLen2; k++)
-                {
-                    mySeq2SoA[k * SIMD_WIDTH8 + j] = 0xFF;
-                }
-            }
+            neon_soa_pack16(mySeq1SoA, seq1p, len1a, len1a, maxLen1 + 1,
+                            0xFF, 0xFF, /*remap4to8=*/false);
+            neon_soa_pack16(mySeq2SoA, seq2p, len2a, quant, maxLen2 + 1,
+                            NEON_QPAD8, 0xFF, /*remap4to8=*/true);
 
             kswv_neon_u8(mySeq1SoA, mySeq2SoA,
                          maxLen1, maxLen2,
