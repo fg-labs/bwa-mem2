@@ -4,6 +4,8 @@ Options:
     -o STR        Output SAM file name
     --bam[=N]     Emit BAM instead of SAM text. N=0 (default) = uncompressed;
                   1..9 = BGZF deflate levels. Writes to stdout; redirect with `>`.
+    --bam-threads INT  BGZF compression threads for --bam output [auto: -t/8]
+                  (0 = serial on the writer thread; auto scales with -t to hide deflate)
     -t INT        number of threads, up to 256; values above 256 are
                   clamped to 256 [1]
     -k INT        minimum seed length [19]

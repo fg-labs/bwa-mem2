@@ -769,6 +769,14 @@ jobs:
           CHR22_SIM_DIR=/tmp/chr22-sim \
           bash test/regression/bam_roundtrip.sh
 
+      - name: --bam-threads byte-identity (chr22, serial vs threaded BGZF)
+        if: matrix.canonical == true
+        run: |
+          BWA_MEM3="$GITHUB_WORKSPACE/bwa-mem3" \
+          CHR22_FA=/tmp/chr22/chr22.fa \
+          CHR22_SIM_DIR=/tmp/chr22-sim \
+          bash test/regression/bam_threads_byte_identity.sh
+
       - name: Thread-determinism smoke (chr22, -t 1 vs -t 4)
         if: matrix.canonical == true
         run: |

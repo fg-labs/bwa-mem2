@@ -20,10 +20,14 @@ formatting; the read path in `samtools sort` performs no text parsing. The
 htslib overhead of the `wb0` write is negligible — it is effectively a
 buffered `write(2)` call with a small BAM block header prepended.
 
-Compressed BAM (`--bam=1`) adds BGZF compression on top, which costs CPU on
-the write side and gains nothing: the pipe is in-process memory or a kernel
-pipe buffer, and `samtools sort` will re-compress the output anyway. Compressed
-BAM on a pipe wastes CPU on both sides.
+Compressed BAM (`--bam=1`) adds BGZF compression on top, which gains nothing
+when piping: the pipe is in-process memory or a kernel pipe buffer, and
+`samtools sort` will re-compress the output anyway, so compressing into a sort
+pipe wastes CPU on both sides — parallelizing the write-side deflate (see
+`--bam-threads` below) does not change that, it only makes the wasted work
+faster. When writing compressed BAM *directly to final storage* (no downstream
+sort), `--bam-threads` (default `-t/8`) keeps the deflate off the throughput
+critical path.
 
 ## Recommended pipeline
 

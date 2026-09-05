@@ -251,6 +251,9 @@ typedef struct mem_opt_t {
                             // to meth_mode: --meth picks alignment semantics, --bam
                             // picks the container, on every mode alike.
     int    bam_level;       // 0..9, BGZF deflate level (0 = uncompressed)
+    int    bam_threads;     // BGZF deflate threads for --bam output (--bam-threads).
+                            // -1 = unset -> auto (n_threads/8 when bam_level>0);
+                            // 0 = serial on the writer thread; N = that many.
     int    meth_mode;       // 1 = bisulfite mode (--meth)
     int    meth_scoring;    // bisulfite matrix mode (--meth-scoring):
                             // MEM_METH_SCORING_{COLLAPSED,GENOMIC,NEUTRAL}

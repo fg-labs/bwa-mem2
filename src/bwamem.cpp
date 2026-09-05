@@ -588,6 +588,7 @@ mem_opt_t *mem_opt_init()
     o->split_factor = 1.5;
     o->chunk_size = 10000000;
     o->n_threads = 1;
+    o->bam_threads = -1;    // -1 = unset: auto-resolved from -t after parsing
     o->max_XA_hits = 5;
     o->max_XA_hits_alt = 200;
     o->max_matesw = 50;

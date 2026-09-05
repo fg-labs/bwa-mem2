@@ -146,7 +146,8 @@ meth_bam_writer_t *meth_bam_writer_open(const char *path_or_dash,
                                         const char *hdr_line,
                                         const char *orig_idx_hdr_lines,
                                         int bam,
-                                        int compression_level)
+                                        int compression_level,
+                                        int n_bgzf_threads)
 {
     if (path_or_dash == NULL || bns == NULL) return NULL;
     meth_bam_writer_t *w = (meth_bam_writer_t *)calloc(1, sizeof(*w));
@@ -163,6 +164,16 @@ meth_bam_writer_t *meth_bam_writer_open(const char *path_or_dash,
     else     snprintf(mode, sizeof(mode), "w");
     w->fp = hts_open(path_or_dash, mode);
     if (w->fp == NULL) { free(w); return NULL; }
+    /* BGZF compression thread pool (BAM container only; the text path does not
+     * deflate). Ordered tpool -> byte-identical compressed stream vs serial.
+     * Non-fatal if it fails; the writer stays serial, but warn so the user
+     * knows --bam-threads was not applied. */
+    if (bam && n_bgzf_threads > 0 && hts_set_threads(w->fp, n_bgzf_threads) < 0)
+        fprintf(stderr,
+                "WARNING: --bam-threads %d could not be applied (htslib "
+                "thread-pool setup failed); compressing BGZF on the single "
+                "writer thread.\n",
+                n_bgzf_threads);
 
     w->hdr = sam_hdr_init();
     if (w->hdr == NULL) { hts_close(w->fp); free(w); return NULL; }

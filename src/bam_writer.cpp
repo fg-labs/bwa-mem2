@@ -32,7 +32,8 @@ bam_writer_t *bam_writer_open(const char *path, const bntseq_t *bns,
                               const char *idx_hdr_lines,
                               const char *hdr_line, const char *bwa_pg,
                               int compression_level,
-                              const compat_target_t *compat)
+                              const compat_target_t *compat,
+                              int n_bgzf_threads)
 {
     if (path == NULL || bns == NULL) return NULL;
     if (compat == NULL) compat = &COMPAT_TARGET_OFF;
@@ -140,6 +141,18 @@ bam_writer_t *bam_writer_open(const char *path, const bntseq_t *bns,
         snprintf(mode, sizeof(mode), "wb%d", compression_level);
         htsFile *fp = hts_open(path, mode);
         if (fp == NULL) goto fail;
+        /* Attach a BGZF compression thread pool. htslib's ordered tpool
+         * emits blocks in dispatch order, so the compressed byte stream is
+         * identical to the serial path (the same guarantee `samtools -@`
+         * relies on) -- only the per-block deflate moves off the writer
+         * thread. Non-fatal if it fails; the writer stays serial, but warn so
+         * the user knows --bam-threads was not applied. */
+        if (n_bgzf_threads > 0 && hts_set_threads(fp, n_bgzf_threads) < 0)
+            fprintf(stderr,
+                    "WARNING: --bam-threads %d could not be applied (htslib "
+                    "thread-pool setup failed); compressing BGZF on the single "
+                    "writer thread.\n",
+                    n_bgzf_threads);
         if (sam_hdr_write(fp, hdr) < 0) { hts_close(fp); goto fail; }
         bam_writer_t *w = (bam_writer_t *)calloc(1, sizeof(*w));
         if (w == NULL) { hts_close(fp); goto fail; }

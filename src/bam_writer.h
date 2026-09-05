@@ -36,7 +36,8 @@ bam_writer_t *bam_writer_open(const char *path, const bntseq_t *bns,
                               const char *idx_hdr_lines,
                               const char *hdr_line, const char *bwa_pg,
                               int compression_level,
-                              const compat_target_t *compat);
+                              const compat_target_t *compat,
+                              int n_bgzf_threads);
 
 /* Write one record. Returns 0 on success, -1 on error. */
 int bam_writer_write(bam_writer_t *w, struct bam1_t *b);

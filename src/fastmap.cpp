@@ -1562,6 +1562,8 @@ static void usage(const mem_opt_t *opt)
     fprintf(stderr, "    -o STR        Output SAM file name\n");
     fprintf(stderr, "    --bam[=N]     Emit BAM instead of SAM text. N=0 (default) = uncompressed;\n");
     fprintf(stderr, "                  1..9 = BGZF deflate levels. Writes to stdout; redirect with `>`.\n");
+    fprintf(stderr, "    --bam-threads INT  BGZF compression threads for --bam output [auto: -t/8]\n");
+    fprintf(stderr, "                  (0 = serial on the writer thread; auto scales with -t to hide deflate)\n");
     fprintf(stderr, "    -t INT        number of threads, up to %d; values above %d are\n"
                      "                  clamped to %d [%d]\n",
             MAX_THREADS, MAX_THREADS, MAX_THREADS, opt->n_threads);
@@ -1971,6 +1973,7 @@ int main_mem(int argc, char *argv[])
     //                       (off by default; not part of Bismark)
     enum {
         OPT_BAM = 1000,
+        OPT_BAM_THREADS,
         OPT_METH,
         OPT_METH_SCORING,
         OPT_METH_SEED_PRUNE,
@@ -2012,6 +2015,7 @@ int main_mem(int argc, char *argv[])
     };
     static struct option long_opts[] = {
         {"bam",                      optional_argument, 0, OPT_BAM},
+        {"bam-threads",              required_argument, 0, OPT_BAM_THREADS},
         {"min-ext-len",              required_argument, 0, OPT_MIN_EXT_LEN},
         {"max-extend-chains",        required_argument, 0, OPT_MAX_EXTEND_CHAINS},
         {"smem-dedup",               no_argument,       0, OPT_SMEM_DEDUP},
@@ -2244,6 +2248,24 @@ int main_mem(int argc, char *argv[])
                  * fire per occurrence and would warn for a level a later
                  * --bam=0 goes on to override. */
             }
+        }
+        else if (c == OPT_BAM_THREADS) {
+            /* Extra BGZF compression threads for the --bam writer. 0 keeps the
+             * serial-on-writer-thread behaviour; N>0 attaches an htslib thread
+             * pool. Byte-identical either way (ordered tpool). Range-validated
+             * via the shared parser (repo convention for numeric options) so a
+             * malformed value errors rather than silently falling back to 0;
+             * accepted range is [0, MAX_THREADS] (the same ceiling -t honours)
+             * and an out-of-range value is rejected, not clamped. */
+            int64_t bt = 0;
+            if (parse_bounded_i64(optarg, 0, MAX_THREADS, &bt) != 0) {
+                fprintf(stderr, "ERROR: --bam-threads must be an integer in [0, %d] (got '%s')\n",
+                        MAX_THREADS, optarg);
+                free(opt);
+                if (out_opened) fclose(aux.fp);
+                return 1;
+            }
+            opt->bam_threads = (int)bt;
         }
 #ifdef STAGE_PROF
         else if (c == OPT_PROFILE) {
@@ -2637,21 +2659,37 @@ int main_mem(int argc, char *argv[])
         return 1;
     }
 
-    /* In-process BGZF deflate runs on the single writer thread, so for large
-     * outputs it -- not alignment -- is usually what caps throughput. Warn
-     * once, here rather than in the parsing loop, so the message describes the
-     * *resolved* setting: `--bam=6 --bam=0` must stay silent (the last --bam
-     * wins and it is uncompressed) and `--bam=6 --bam=6` must warn once, not
-     * per occurrence. Placed after the positional-argument check so a usage
-     * error is not preceded by a warning about output it never writes. */
-    if (opt->bam_mode && opt->bam_level > 0)
+    /* Resolve --bam-threads (the BGZF deflate pool for --bam output). Done here,
+     * after parsing, so n_threads and bam_level are final. Deflate work is fixed
+     * per output but alignment gets faster with -t, so the pool must scale with
+     * -t to keep the deflate hidden behind alignment: n_threads/8 tracks the
+     * measured plateau (~2 @ -t16, ~4 @ -t32, ~8 @ -t64) and stays a small
+     * fraction of the core budget. Only for compressed output (level 0 stores
+     * blocks, nothing to deflate). An explicit --bam-threads N -- including 0 --
+     * is always honoured; the sentinel -1 means "unset -> auto". */
+    const int bam_threads_user_set = (opt->bam_threads >= 0);
+    if (!bam_threads_user_set)
+        opt->bam_threads = (opt->bam_level > 0) ? (opt->n_threads / 8) : 0;
+    /* --bam-threads only shapes the BAM writer; on the SAM text path there is no
+     * BGZF writer to attach a pool to, so a user-set positive value is inert.
+     * Say so rather than silently ignoring it. */
+    if (bam_threads_user_set && !opt->bam_mode && opt->bam_threads > 0)
         fprintf(stderr,
-            "WARNING: --bam=%d writes compressed BAM on a single writer "
-            "thread; BGZF deflate is not parallelized here, so for large "
-            "outputs this serial compression is usually the bottleneck. "
-            "Prefer uncompressed output (--bam, i.e. --bam=0) piped to a "
-            "threaded compressor, e.g. "
-            "`bwa-mem3 mem --bam ... | samtools view -@ N -b -o out.bam`.\n",
+            "WARNING: --bam-threads %d has no effect without --bam (SAM output "
+            "is not BGZF-compressed).\n",
+            opt->bam_threads);
+    /* The only serial-deflate throughput trap left is a user *explicitly*
+     * forcing --bam-threads 0 at a compressing level (the auto path already
+     * relieves it, and at low -t auto resolves to 0 harmlessly because the
+     * short serial deflate hides behind the longer alignment). Warn once, from
+     * the resolved settings, placed after the positional-argument check so a
+     * usage error is not preceded by a warning about output it never writes. */
+    if (bam_threads_user_set && opt->bam_mode && opt->bam_level > 0 && opt->bam_threads == 0)
+        fprintf(stderr,
+            "WARNING: --bam=%d with --bam-threads 0 deflates BGZF on the single "
+            "writer thread, usually the bottleneck for large compressed outputs. "
+            "Drop --bam-threads to auto-scale it (~n_threads/8), or pass a "
+            "positive value.\n",
             opt->bam_level);
 
     /* Further input parsing */
@@ -3468,7 +3506,8 @@ int main_mem(int argc, char *argv[])
         g_meth_bam_writer = meth_bam_writer_open(meth_out_path, aux.meth_orig_bns,
                                                  bwa_pg, NULL,
                                                  hdr_line, meth_orig_hdr_lines,
-                                                 opt->bam_mode, opt->bam_level);
+                                                 opt->bam_mode, opt->bam_level,
+                                                 opt->bam_threads);
         if (g_meth_bam_writer == NULL) {
             fprintf(stderr, "ERROR: meth: failed to open %s writer for '%s'\n",
                     opt->bam_mode ? "BAM" : "SAM", meth_out_path);
@@ -3486,7 +3525,8 @@ int main_mem(int argc, char *argv[])
                                 ? NULL : idx_hdr_lines;
         bam_writer = bam_writer_open(bam_path, aux.fmi->idx->bns,
                                      bam_idx_hdr, hdr_line,
-                                     bwa_pg, opt->bam_level, opt->compat);
+                                     bwa_pg, opt->bam_level, opt->compat,
+                                     opt->bam_threads);
         if (bam_writer == NULL) {
             fprintf(stderr, "ERROR: failed to open BAM writer at '%s'\n", bam_path);
             free(opt);

@@ -55,11 +55,20 @@ CPU and is the recommended mode for piping to `samtools sort`. Values `1`–`9`
 select increasing BGZF deflate levels; use `--bam=6` or `--bam=9` only when
 writing directly to final storage without a downstream sort step.
 
-Any level above `0` prints a one-line warning to stderr: BGZF deflate runs on
-the single writer thread, so for large outputs that serial compression — not
-alignment — is usually what caps throughput. The warning reflects the resolved
-level, so it is emitted once and not at all when a later `--bam=0` overrides an
-earlier compressed level.
+For compressed output (`--bam=1..9`) the BGZF deflate is parallelized across a
+thread pool sized by `--bam-threads`, which defaults to the integer `-t/8`; at
+`-t >= 8` this keeps serial compression from being the throughput bottleneck on
+the measured WGS workload (the benefit is workload- and platform-dependent — the
+feature notes record the benchmark's workload, host, architecture, and SIMD tier).
+Below `-t 8` the integer `-t/8` is 0, so serial compression remains the default
+there. The decoded
+alignment records and the compressed record bytes stay byte-identical to the
+single-threaded path (with identical batching), after excluding the `@PG CL:`
+line, which records the `--bam-threads` value and so differs between a serial and
+an explicit-thread invocation. Pass `--bam-threads 0` to force the
+old serial deflate; doing so at a compressing level prints a one-line stderr
+warning (emitted once, from the resolved settings, and not at all when a later
+`--bam=0` overrides an earlier compressed level).
 
 > **Tip — Prefer --bam for production pipelines**
 >
