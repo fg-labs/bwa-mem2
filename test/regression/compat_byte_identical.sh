@@ -242,6 +242,20 @@ compat_err() { # <expected-substring> <spelling...> -- must exit nonzero AND say
         exit 1
     fi
 }
+compat_warn() { # <expected-substring> <spelling...> -- must exit 0 AND warn
+    want="$1"
+    shift
+    if ! "$BWA_MEM3" mem "$@" "$ref" "$r1" "$r2" > /dev/null 2> "$COMPAT_WORK_DIR/cli.log"; then
+        echo "FAIL: 'mem $*' exited nonzero, expected success with a warning:" >&2
+        cat "$COMPAT_WORK_DIR/cli.log" >&2
+        exit 1
+    fi
+    if ! grep -q "$want" "$COMPAT_WORK_DIR/cli.log"; then
+        echo "FAIL: 'mem $*' succeeded but without the expected warning '$want':" >&2
+        cat "$COMPAT_WORK_DIR/cli.log" >&2
+        exit 1
+    fi
+}
 
 compat_ok --compat=bwa-mem2   # canonical, '=' form
 compat_ok --compat bwa-mem2   # canonical, space form (required_argument)
@@ -281,10 +295,12 @@ compat_err "mutually exclusive" --compat=bwa-mem2 --extend-tie-frac=0.95
 compat_err "mutually exclusive" --extend-tie-frac=0.95 --compat=bwa-mem2
 compat_err "mutually exclusive" --compat=bwa-mem2 --extend-tie-frac=0.95 --extend-csub
 compat_err "mutually exclusive" --compat=bwa-mem2 --extend-csub --max-extend-chains=5
-# --extend-tie-floor alone (--extend-tie-frac at 0) is always a no-op, with or
-# without --max-extend-chains, so --compat must accept it.
+# --extend-tie-floor alone (--extend-tie-frac at 0) is always a no-op, so --compat
+# must accept it. But --max-extend-chains != 0 is itself an independent divergent
+# lever (the plain count cap prunes chains on its own), so pairing it with --compat
+# IS an error now, regardless of --extend-tie-floor.
 compat_ok --compat=bwa-mem2 --extend-tie-floor=1
-compat_ok --compat=bwa-mem2 --extend-tie-floor=1 --max-extend-chains=5
+compat_err "mutually exclusive" --compat=bwa-mem2 --extend-tie-floor=1 --max-extend-chains=5
 # --extend-csub alone, with no cap active to ever populate capped_w, is also a
 # no-op.
 compat_ok --compat=bwa-mem2 --extend-csub
@@ -293,6 +309,60 @@ compat_ok --compat=bwa-mem2 --extend-csub
 # flag was typed.
 compat_ok --compat=bwa-mem2 --extend-tie-frac=0
 compat_ok --compat=off --extend-tie-frac=0.95 --extend-csub
+
+# --- Every bwa-mem3-only alignment/MAPQ lever is guarded under --compat. -------
+# These are all levers no upstream (bwa-mem / bwa-mem2) can express, so engaging
+# any of them under a byte-identity target changes alignments/MAPQ and must be
+# refused. The guard is centralized, so one row per lever; test them here so a
+# newly-added lever that forgets the guard fails loudly. Checked against BOTH
+# targets for the count cap (they share the reject list; only the output-shaping
+# struct differs by target).
+compat_err "mutually exclusive" --compat=bwa-mem2 --max-extend-chains=5
+compat_err "mutually exclusive" --compat=bwa-mem --max-extend-chains=5
+compat_err "mutually exclusive" --compat=bwa-mem2 --min-ext-len 30
+compat_err "mutually exclusive" --compat=bwa-mem2 --smem-dedup
+compat_err "mutually exclusive" --compat=bwa-mem2 --adaptive-band
+compat_err "mutually exclusive" --compat=bwa-mem2 --rescue-kmer
+compat_err "mutually exclusive" --compat=bwa-mem2 --supp-rep-hard-cap=10
+compat_err "mutually exclusive" --compat=bwa-mem2 --seed-order local-longest
+compat_err "mutually exclusive" --compat=bwa-mem2 --skip-contained-ext
+compat_err "mutually exclusive" --compat=bwa-mem2 --chunk-cap 1000
+# The error must NAME the offending flag(s) (the guard builds the list at runtime),
+# so assert on the flag name, not just the boilerplate. A two-lever case pins that
+# the accumulation lists more than one.
+compat_err "smem-dedup" --compat=bwa-mem2 --smem-dedup
+compat_err "adaptive-band" --compat=bwa-mem2 --smem-dedup --adaptive-band
+# Order independence: the guard must fire whichever side the target is on.
+compat_err "mutually exclusive" --smem-dedup --compat=bwa-mem2
+# Off-state / no-cap values are the byte-identical default and must NOT trip it --
+# the guard keys off the effective value, not whether the flag was typed. Cover the
+# value-taking levers explicitly (their nonzero forms are exercised above).
+compat_ok --compat=bwa-mem2 --chunk-cap 0
+compat_ok --compat=bwa-mem2 --seed-order off
+compat_ok --compat=bwa-mem2 --rescue-kmer=0
+compat_ok --compat=bwa-mem2 --max-extend-chains=0
+compat_ok --compat=bwa-mem2 --supp-rep-hard-cap=0
+compat_ok --compat=bwa-mem2 --min-ext-len 0
+# A divergent lever without --compat is of course fine.
+compat_ok --smem-dedup
+compat_ok --compat=off --smem-dedup
+
+# --- --compat-allow-divergent: opt-in escape hatch. ---------------------------
+# It downgrades the divergent-lever refusal to a warning and proceeds, so the
+# user keeps the target's OUTPUT CONVENTIONS with a bwa-mem3 lever engaged. Must
+# still WARN (output is no longer byte-identical), and must NOT relax the two
+# category errors (--fast, --meth), which stay hard-rejected even with the hatch.
+compat_warn "NOT byte-identical" --compat=bwa-mem2 --smem-dedup --compat-allow-divergent
+compat_warn "NOT byte-identical" --compat=bwa-mem2 --max-extend-chains=5 --compat-allow-divergent
+compat_warn "NOT byte-identical" --compat=bwa-mem2 --proper-pair-from-emitted --compat-allow-divergent
+# The warning, like the error, must NAME the forced lever (same runtime-built list).
+compat_warn "smem-dedup" --compat=bwa-mem2 --smem-dedup --compat-allow-divergent
+# Hatch does not rescue the category errors.
+compat_err "mutually exclusive" --compat=bwa-mem2 --fast --compat-allow-divergent
+compat_err "no methylation mode" --compat=bwa-mem2 --meth --compat-allow-divergent
+# Hatch is a harmless no-op without --compat, and with --compat but no lever.
+compat_ok --compat-allow-divergent --smem-dedup
+compat_ok --compat=bwa-mem2 --compat-allow-divergent
 echo "PASS: --compat enum grammar (=/space, alias, off, both targets, unknown, exactness)"
 
 # --- Source guard: both proper-pair sites share one derivation. --------------

@@ -15,9 +15,16 @@ Keeping those two straight is the whole point of this page.
 | **`--compat=bwa-mem`** | reproduces **bwa 0.7.19**'s alignment records — *including its divergences from bwa-mem2* | `HN` suppressed, `MQ` kept | matches bwa 0.7.19 except `@PG` (still `bwa-mem3`) |
 | **`--fast`** | perf-driven — reshuffles the low-confidence tail (details below) | bwa-mem3 tags | bwa-mem3 header |
 
-`--compat` is **mutually exclusive** with `--fast`, `--meth`, and `--proper-pair-from-emitted`
-(each combination is a hard error): `--compat` asks for byte-identity with an upstream, while each
-of the others deliberately changes the output.
+`--compat` rejects any bwa-mem3-only lever that changes alignments or MAPQ, since the upstream has
+no such knob and so cannot reproduce the output at any setting. `--fast` and `--meth` are **always**
+refused — category errors, not divergences: `--fast` is an opaque multi-flag bundle, and no target
+has a bisulfite mode. The rest — `--smem-dedup`, `--adaptive-band`, `--max-extend-chains`,
+`--min-ext-len`, `--extend-tie-frac`, `--rescue-kmer`, `--supp-rep-hard-cap`, `--seed-order`,
+`--skip-contained-ext`, `--chunk-cap` and `--proper-pair-from-emitted` — are a hard error too, but
+can be forced with **`--compat-allow-divergent`**, which keeps the target's output *conventions*
+with a lever engaged (output is then not byte-identical). Shared knobs the upstream also has
+(scoring, seeding widths, `-T`, …) are **not** guarded — changing one moves both sides to the same
+operating point.
 
 ## 1. Plain (default) — a drop-in that fixes real bugs
 

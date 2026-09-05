@@ -61,9 +61,16 @@ Options:
                   v2.2.1 forked at bwa 0.7.17, before either landed.
                   bwa-mem:  keep both -- bwa 0.7.18+ emits them. Pinned at 0.7.19.
                   Shapes output only; changes no alignment. @PG still differs (it
-                  is run-specific) -- exclude it when comparing. Mutually exclusive
-                  with --fast (which changes alignments) and with --meth (neither
-                  target has a bisulfite mode) -- combining them is an error [off]
+                  is run-specific) -- exclude it when comparing. Rejects any
+                  bwa-mem3-only lever that changes alignments/MAPQ (e.g. --smem-dedup,
+                  --adaptive-band, --max-extend-chains, --min-ext-len, --rescue-kmer,
+                  --seed-order); --fast and --meth are always refused, the rest can
+                  be forced with --compat-allow-divergent [off]
+    --compat-allow-divergent  with --compat, downgrade the divergent-lever refusal
+                  to a warning: keep the target's OUTPUT CONVENTIONS while running a
+                  bwa-mem3-only lever. Output is then NOT byte-identical to the
+                  target. Does not relax --fast/--meth (category errors, not
+                  divergences). No effect without --compat [off]
 Scoring options:
    -A INT        score for a sequence match, which scales options -TdBOELU unless overridden [1]
    -B INT        penalty for a mismatch [4]
@@ -174,9 +181,10 @@ Supplementary MAPQ rescoring (fg-labs extension):
    --proper-pair-from-emitted
                  derive the proper-pair FLAG bit (0x2) from the alignment actually
                  emitted rather than the top-scoring one. bwa and bwa-mem2 both use
-                 the top-scoring one, so this deviates from both and is mutually
-                 exclusive with --compat. Has no effect unless the index has a .alt
-                 sidecar: the two differ only for reads with ALT hits [off]
+                 the top-scoring one, so this deviates from both; --compat refuses
+                 it by default (override with --compat-allow-divergent). Has no
+                 effect unless the index has a .alt sidecar: the two differ only
+                 for reads with ALT hits [off]
 Seed ordering (fg-labs extension):
    --seed-order STR
                  seed emission order before chaining: off|local-longest [off]

@@ -89,7 +89,7 @@ Closes [issue #46](https://github.com/fg-labs/bwa-mem3/issues/46).
 
 `--proper-pair-from-emitted` derives the proper-pair bit (`FLAG` `0x2`) from the alignment each record actually carries (`a[which]`) instead of the top-scoring region (`a[0]`). Default off, which is bwa's and bwa-mem2's behavior — both derive the bit from `a[0]` unconditionally, even when the record they emit is `a[which]`.
 
-The option is a deliberate deviation from both upstreams, so it is **incompatible with `--compat`**: supplying both is a hard error, the same contract `--fast` has. It is also inert without a `.alt` sidecar — the two regions coincide unless the read has ALT hits — so on a reference without one, the alignment output is byte-identical either way, excluding the `@PG` record, whose `CL:` field records the command line and therefore always reflects the flag.
+The option is a deliberate deviation from both upstreams, so it is **incompatible with `--compat`**: supplying both is a hard error — overridable with `--compat-allow-divergent` (unlike `--fast`, which stays a hard error because it is a multi-flag bundle rather than a single divergent knob). It is also inert without a `.alt` sidecar — the two regions coincide unless the read has ALT hits — so on a reference without one, the alignment output is byte-identical either way, excluding the `@PG` record, whose `CL:` field records the command line and therefore always reflects the flag.
 
 This is a correctness-argument item rather than a capability, so the reasoning, the measurement, and the [#17](https://github.com/fg-labs/bwa-mem3/pull/17) → [#362](https://github.com/fg-labs/bwa-mem3/issues/362) history live in [Correctness fixes → Proper-pair flag](correctness.md), with the divergence recorded in [Equivalence](equivalence.md).
 
@@ -444,6 +444,20 @@ threads — a single-host, single-config measurement, not a cross-architecture o
 cross-thread claim. `--fast` and `--adaptive-band` turn the
 certificate off (they select the aggressive band instead); `--meth` also runs the
 exact full-width ladder (the certificate is a non-meth optimization).
+
+## `--compat-allow-divergent` force a bwa-mem3 lever under `--compat`
+
+`--compat=<target>` is a byte-identity contract, so it rejects any bwa-mem3-only lever that changes
+alignments or MAPQ — the upstream has no such knob and cannot reproduce the output at any setting.
+`--compat-allow-divergent` downgrades that refusal to a warning (naming the offending flags) and
+proceeds: the user keeps the target's output *conventions* (tag/header shaping) with a lever
+engaged, but the output is then **not** byte-identical to the target (the `@PG` `CL:` record already
+records which flags ran). Default off; no effect without `--compat`.
+
+It deliberately does **not** relax `--fast` or `--meth`: those are category errors, not
+divergences — `--fast` is an opaque multi-flag bundle, and no target has a bisulfite mode, so
+"byte-identical to X under `--meth`" is undefined rather than merely violated. The full reject list
+and the shared-knob rule live in [Equivalence](equivalence.md) and [Alignment modes](modes.md).
 
 ## Changes catalog
 

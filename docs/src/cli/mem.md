@@ -179,24 +179,38 @@ Notes and caveats:
   different alignments, defeating the parity-validation purpose. `--compat` is
   for the drop-in profile. (`--compat=off --fast` is fine: `off` selects no
   target.)
-- **Mutually exclusive with [`--proper-pair-from-emitted`](#--proper-pair-from-emitted--derive-flag-0x2-from-the-emitted-alignment).**
-  Passing both is a hard error (`--compat and --proper-pair-from-emitted are
-  mutually exclusive`), for the same reason as `--fast`: that flag derives
-  `FLAG` `0x2` from the emitted alignment, which neither target does, so the
-  pair asks for byte-identity and for a documented deviation from it in one
-  command. (`--compat=off --proper-pair-from-emitted` is fine.)
+- **Every bwa-mem3-only alignment lever is rejected — overridable with `--compat-allow-divergent`.**
+  Any bwa-mem3-only option that changes alignments or MAPQ is a hard error under
+  `--compat`, because the upstream has no such knob and so cannot reproduce the
+  output at any setting: `--smem-dedup`, `--adaptive-band`, `--max-extend-chains`,
+  `--min-ext-len`, `--extend-tie-frac`, `--rescue-kmer`, `--supp-rep-hard-cap`,
+  `--seed-order`, `--skip-contained-ext`, `--chunk-cap`, and
+  [`--proper-pair-from-emitted`](#--proper-pair-from-emitted--derive-flag-0x2-from-the-emitted-alignment).
+  The error names the offending flags (`--compat and these bwa-mem3-only levers
+  are mutually exclusive: ...`). Pass **`--compat-allow-divergent`** to downgrade
+  the refusal to a warning and proceed: you keep the target's *output
+  conventions* (tag/header shaping) while a bwa-mem3 lever is engaged, but the
+  output is then **not** byte-identical to the target (the `@PG` `CL:` record
+  already documents which flags ran). Shared knobs the upstream also has (scoring
+  `-A`/`-B`, `-k`/`-w`/`-r`, `-T`, …) are *not* guarded — changing one just moves
+  both sides to the same operating point, so byte-identity still holds.
+- **The escape hatch does not relax `--fast` or `--meth`.** Those stay hard
+  errors even with `--compat-allow-divergent`, because they are category errors,
+  not divergences: `--fast` is an opaque multi-flag bundle (not a single knob a
+  user could sanely override), and no target has a bisulfite mode, so
+  "byte-identical to X under `--meth`" is undefined rather than merely violated.
 - **An `@HD` in `-H` warns but is allowed.** bwa-mem3 hoists a *leading* user
   `@HD` above the `@SQ` block, so the header is spec-valid (`@HD` must come
   first). Neither target does that — bwa emits `-H` records after `@SQ` and
   bwa-mem2 has no `@HD` handling at all — so the header differs from the target
   in **line order**. Records are unaffected.
 
-  This is not rejected, unlike `--fast`, `--proper-pair-from-emitted` and
-  `--meth`, because it is an explicit and coherent request: *give me a valid SAM
-  header, everything else the same*. Those three change what the records say —
-  `--fast` silently moves alignments, `--proper-pair-from-emitted` moves `FLAG`
-  `0x2`, and `--meth` is a different mode — and a user cannot see any of them in
-  their own command line. An `@HD` they typed, they can.
+  This is not rejected, unlike `--fast`, `--meth` and the bwa-mem3-only
+  alignment levers above, because it is an explicit and coherent request: *give
+  me a valid SAM header, everything else the same*. Those change what the records
+  say — `--fast` silently moves alignments, `--proper-pair-from-emitted` moves
+  `FLAG` `0x2`, `--meth` is a different mode — and a user cannot see any of them
+  in their own command line. An `@HD` they typed, they can.
 
   Only a *leading* `@HD` diverges; a later one is emitted inline after `@SQ`
   exactly as upstream does, and does not warn. Every other `-H` record (`@RG`,
@@ -909,7 +923,8 @@ emits (`a[which]`) rather than from the top-scoring region (`a[0]`).
 
 **bwa and bwa-mem2 both use `a[0]`**, even when the record they emit is
 `a[which]` — so this flag deviates from *both* upstreams, and is a **hard error**
-combined with [`--compat`](#--compattarget--byte-identical-output-for-another-aligner).
+combined with [`--compat`](#--compattarget--byte-identical-output-for-another-aligner)
+(overridable via `--compat-allow-divergent`).
 
 **It has no effect on alignment output unless the index carries a `.alt`
 sidecar** (the `@PG` `CL:` field records the command line either way, so that

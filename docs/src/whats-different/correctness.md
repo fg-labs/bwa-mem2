@@ -161,7 +161,7 @@ no open upstream PR.
 > on the primary assembly.
 >
 > The behavior is now reached via `--proper-pair-from-emitted` (a hard error
-> with `--compat`), and the default derives `0x2` from `a[0]` as bwa and
+> with `--compat`, overridable via `--compat-allow-divergent`), and the default derives `0x2` from `a[0]` as bwa and
 > bwa-mem2 do. This follows the same call [#256](https://github.com/fg-labs/bwa-mem3/pull/256)
 > made on gap-open convention: where a fork-carried improvement moves output,
 > the drop-in path takes upstream's answer and the improvement becomes opt-in.
