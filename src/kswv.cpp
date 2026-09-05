@@ -299,6 +299,21 @@ kswv::kswv(const int o_del, const int e_del, const int o_ins,
     for (int32_t j = 0; j < this->maxQerLen; ++j)
         for (int k = 0; k < SIMD_WIDTH8; ++k)
             colIdx8[(size_t) j * SIMD_WIDTH8 + k] = (uint8_t) j;
+
+    /* 16-bit twins for the NEON 16-bit kernel (see kswv.h): a column-index
+     * broadcast table and two rows of per-QE_BLK running-max checkpoints.
+     * ncol never exceeds maxQerLen (the wrapper pads each lane's query to its
+     * 8-column quantum, and maxQerLen carries a +16 margin), so one extra
+     * block per row covers the partial tail. */
+    colIdx16 = (int16_t *)_mm_malloc((size_t) this->maxQerLen * SIMD_WIDTH16
+                                     * sizeof(int16_t), 64);
+    xassert(colIdx16 != NULL, "kswv: colIdx16 allocation failed");
+    for (int32_t j = 0; j < this->maxQerLen; ++j)
+        for (int k = 0; k < SIMD_WIDTH16; ++k)
+            colIdx16[(size_t) j * SIMD_WIDTH16 + k] = (int16_t) j;
+    qeBlk16Stride = ((this->maxQerLen + QE_BLK - 1) / QE_BLK + 1) * SIMD_WIDTH16;
+    qeBlk16 = (int16_t *)_mm_malloc((size_t) 2 * qeBlk16Stride * sizeof(int16_t), 64);
+    xassert(qeBlk16 != NULL, "kswv: qeBlk16 allocation failed");
 }
 
 // Mat-aware constructor (issue 173). Delegates to the 9-arg ctor (identical
@@ -409,6 +424,8 @@ kswv::~kswv() {
     _mm_free(F16); _mm_free(H16_0); _mm_free(H16_1);
     _mm_free(rowMax16);
     _mm_free(colIdx8);
+    _mm_free(colIdx16);
+    _mm_free(qeBlk16);
 }
 
 
@@ -1623,7 +1640,9 @@ void kswv::kswvBatchWrapper16(SeqPair *pairArray,
     return;
 }
 
-/* Thin dispatcher: see kswv_neon_u8. */
+/* Thin dispatcher: see kswv_neon_u8. The 16-bit sweep honours the same
+ * BWA3_RESCUE_ROWPAIR / BWA3_RESCUE_LAZYQE toggles as the u8 kernel (there is
+ * no biased/USQADD split here: int16 has no bias). */
 int kswv::kswv_neon_16(int16_t seq1SoA[],
                        int16_t seq2SoA[],
                        int16_t nrow,
@@ -1635,14 +1654,21 @@ int kswv::kswv_neon_16(int16_t seq1SoA[],
                        int32_t numPairs,
                        int phase)
 {
-    return has_freed
-        ? kswv_neon_16_impl<true>(seq1SoA, seq2SoA, nrow, ncol, p, aln,
+    const bool pair = rescue_rowpair_enabled();
+    const bool lazy = pair && rescue_lazyqe_enabled();
+#define KSWV_16_DISPATCH(HF, RP, LQ)                                            \
+    kswv_neon_16_impl<HF, RP, LQ>(seq1SoA, seq2SoA, nrow, ncol, p, aln,         \
                                   po_ind, tid, numPairs, phase)
-        : kswv_neon_16_impl<false>(seq1SoA, seq2SoA, nrow, ncol, p, aln,
-                                   po_ind, tid, numPairs, phase);
+#define KSWV_16_DISPATCH_PAIR(HF)                                               \
+    (pair ? (lazy ? KSWV_16_DISPATCH(HF, true, true)                            \
+                  : KSWV_16_DISPATCH(HF, true, false))                          \
+          : KSWV_16_DISPATCH(HF, false, false))
+    return has_freed ? KSWV_16_DISPATCH_PAIR(true) : KSWV_16_DISPATCH_PAIR(false);
+#undef KSWV_16_DISPATCH_PAIR
+#undef KSWV_16_DISPATCH
 }
 
-template<bool HasFreed>
+template<bool HasFreed, bool RowPair, bool LazyQE>
 int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
                             int16_t seq2SoA[],
                             int16_t nrow,
@@ -1661,8 +1687,15 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
      * has_endsc_vec so lanes without a target aren't frozen prematurely),
      * per-row frozen_bits collapsed from frozen_vec for the batched early
      * exit, and a scalar b[]-emulation score2 scan over rowMax matching
-     * scalar ksw_i16 exactly. The
-     * pre-rewrite kernel never wrote rowMax, never computed score2
+     * scalar ksw_i16 exactly. It also carries the u8 kernel's sweep
+     * structure: the boundary (padding) test is hoisted per row and elided
+     * outright below minLen1 / jsplit, the query-end column is recovered
+     * lazily after the row from the stored H (per-QE_BLK checkpoints, see
+     * KSWV_U8_EPILOGUE), and two target rows are processed per column sweep
+     * when RowPair is set (LazyQE selects lazy vs inline argmax there, as in
+     * the u8 kernel). The one-row body is always lazy.
+     *
+     * The pre-rewrite kernel never wrote rowMax, never computed score2
      * (hardcoded to -1), and global-broke the DP as soon as any lane's
      * gmax >= endsc_vec (trivially true for mate-rescue pairs whose
      * endsc_vec defaults to 0 since KSW_XSTOP is unset) — which made
@@ -1674,12 +1707,16 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
      *   - int16 arithmetic; no shift offset, clamp intermediate H to 0
      *     via vmaxq_s16 (scalar ksw_i16 does the same)
      *   - No u8 overflow check; int16 has plenty of headroom for SW scores
+     *   - the query-tail pad (DUMMY3) is already folded into the 32-entry
+     *     score table, so there is no jdummy split
      */
     int16_t minsc[SIMD_WIDTH16] __attribute((aligned(128))) = {0};
     int16_t endsc[SIMD_WIDTH16] __attribute((aligned(128))) = {0};
 
     int16x8_t zero_vec = vdupq_n_s16(0);
     int16x8_t one_vec  = vdupq_n_s16(1);
+    const uint16x8_t zero_u16 = vdupq_n_u16(0);
+    (void) one_vec; (void) zero_u16;
 
     /* Scoring table: 32-byte int8 table indexed by (s1 ^ s2) in [0..31].
      *
@@ -1728,7 +1765,6 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
         if (val <= SHRT_MAX) { endsc[i] = (int16_t)val; endsc_msk_a |= (0x1 << i); }
     }
 
-    int16x8_t minsc_vec = vld1q_s16(minsc);
     int16x8_t endsc_vec = vld1q_s16(endsc);
 
     int16x8_t e_del_vec  = vdupq_n_s16(this->e_del);
@@ -1747,12 +1783,23 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
     for (int i = 0; i < SIMD_WIDTH16; i++)
         _has_endsc_arr[i] = (endsc_msk_a & (1 << i)) ? (int16_t)0xFFFF : (int16_t)0x0000;
     int16x8_t has_endsc_vec = vld1q_s16(_has_endsc_arr);
+    uint8_t frozen_bits = 0;
 
     tid = 0;
     int16_t *H0     = H16_0    + tid * SIMD_WIDTH16 * this->maxQerLen;
     int16_t *H1     = H16_1    + tid * SIMD_WIDTH16 * this->maxQerLen;
     int16_t *F      = F16      + tid * SIMD_WIDTH16 * this->maxQerLen;
     int16_t *rowMax = rowMax16 + tid * SIMD_WIDTH16 * this->maxRefLen;
+
+    /* Query-end recovery scratch (see kswv.h): the column-index broadcast
+     * table and two rows' worth of per-QE_BLK running-max checkpoints
+     * (blockMax for the one-row body and row i of a pair, blockMax1 for row
+     * i+1). Sized from maxQerLen in the constructor because the 16-bit tier
+     * has no 256-column admission bound. */
+    const int16_t *colIdx = this->colIdx16;
+    int16_t *blockMax  = this->qeBlk16;
+    int16_t *blockMax1 = this->qeBlk16 + this->qeBlk16Stride;
+    (void) blockMax1;
 
     /* Per-strip warm-up prefetches. F and H1 are loop-resident (read+written
      * every row, fit in L1) and seq2SoA is swept every row, so they want a keep
@@ -1770,16 +1817,268 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
     vst1q_s16(H0, zero_vec);
     vst1q_s16(H1, zero_vec);
 
-    int16x8_t imax_vec, pimax_vec = zero_vec;
+    /* Boundary-mask fast-path bounds, as in the u8 kernel: jsplit is the
+     * first column any lane pads with the 0xFFFF query sentinel
+     * (min(query_quantum16(len2))), minLen1 the shortest reference window.
+     * Below both no cell can be padding and the mask is skipped; on rows
+     * >= minLen1 but columns < jsplit only the reference half applies and
+     * is loop-invariant across the row; from jsplit on the full per-cell
+     * form runs. Only the 0xFFFF sentinel is negative as int16 (AMBR16 = 15,
+     * AMBQ16 = 16 and DUMMY3 = 26 all have bit 15 clear), so the boundary
+     * test is a single signed compare against zero. */
+    int minLen1 = p[0].len1, jsplit = ncol;
+    for (int l = 0; l < SIMD_WIDTH16; l++) {
+        if (p[l].len1 < minLen1) minLen1 = p[l].len1;
+        const int quanta = query_quantum16(p[l].len2);
+        if (quanta < jsplit) jsplit = quanta;
+    }
 
-    int i, limit = nrow;
-    for (i = 0; i < nrow; i++) {
+    int16x8_t pimax_vec = zero_vec;
+
+    /* Boundary mask of an int16 code vector (0xFFFF pad -> lane all-ones),
+     * and its application to the diagonal term. */
+#define KSWV16_BND(x)             vcltzq_s16(x)
+#define KSWV16_ZERO_BND(m11, BND) vreinterpretq_s16_u16(vbicq_u16(vreinterpretq_u16_s16(m11), (BND)))
+
+    /* Substitution score for (row base vector, query column vector): 8-lane
+     * int16 table lookup -- narrow the xor (values in [0..31]) to 8 u8
+     * indices, gather from the 32-byte int8 table via vqtbl2, sign-extend
+     * back to int16 -- plus the rank-1 freed-cell override when HasFreed
+     * (one compare against the row's active_frread + one blend;
+     * FREED_INACTIVE16 lanes never match a real s2). */
+#define KSWV16_SBT(s1v, s2v, out, active_fr)                                    \
+    {                                                                           \
+        uint8x8_t idx8_ = vmovn_u16(vreinterpretq_u16_s16(veorq_s16((s1v), (s2v)))); \
+        out = vmovl_s8(vqtbl2_s8(perm_vec, idx8_));                             \
+        if (HasFreed)                                                           \
+            out = vbslq_s16(vceqq_s16((s2v), (active_fr)), freedval_vec16, out); \
+    }
+
+    /* Per-row epilogue, shared by the one-row and two-row sweeps -- the
+     * int16 twin of KSWV_U8_EPILOGUE. Threads the cross-row state (lagged
+     * rowMax store via pimax_vec, gmax/te/qe with the per-lane freeze mask,
+     * frozen_bits for the batched early exit) and MUST run once per row in
+     * ascending row order. EPI_INLINE_QE selects the query-end source: the
+     * lazy rescan of EPI_HBASE (column j2 at index j2) restricted to the
+     * QE_BLK block(s) EPI_BLOCKMAX says can hold the row max, or a column
+     * value carried per cell (EPI_COL). Both give min{ j : H[j] == imax }. */
+#define KSWV_16_EPILOGUE(EPI_ROW, EPI_IMAX, EPI_INLINE_QE, EPI_COL, EPI_BLOCKMAX, EPI_HBASE) \
+    {                                                                           \
+        const int __row = (EPI_ROW);                                            \
+        const int16x8_t __imax = (EPI_IMAX);                                    \
+        int16_t *const __bmax = (EPI_BLOCKMAX);                                 \
+        const int16_t *const __hbase = (EPI_HBASE);                             \
+        const int16x8_t i_vec = vdupq_n_s16((int16_t)__row);                    \
+        if (!(EPI_INLINE_QE))                                                   \
+            vst1q_s16(__bmax + ((ncol - 1) / QE_BLK) * SIMD_WIDTH16, __imax);   \
+        /* Block I: write prior-row's pimax to rowMax. No intermediate       \
+         * masking -- frozen lanes' imax after the freeze row is still        \
+         * produced by the DP but the score2 scan filters by per-lane        \
+         * primary region / minsc / qe, which matches scalar. */             \
+        if (__row > 0)                                                          \
+            vst1q_s16(rowMax + (__row - 1) * SIMD_WIDTH16, pimax_vec);          \
+        pimax_vec = __imax;                                                     \
+        /* Block II: gmax / te / qe update with per-lane freeze mask. */       \
+        uint16x8_t cmp0 = vcgtq_s16(__imax, gmax_vec);                          \
+        uint16x8_t frozen_u16 = vreinterpretq_u16_s16(frozen_vec);              \
+        uint16x8_t cmp0_active = vbicq_u16(cmp0, frozen_u16);                   \
+        int16x8_t new_gmax = vmaxq_s16(gmax_vec, __imax);                       \
+        gmax_vec = vbslq_s16(frozen_u16, gmax_vec, new_gmax);                   \
+        te_vec = vbslq_s16(cmp0_active, i_vec, te_vec);                         \
+        if (!(EPI_INLINE_QE)) {                                                 \
+            if (vmaxvq_u16(cmp0_active)) {                                      \
+                int16x8_t iqe_vec = vdupq_n_s16(-1);                            \
+                uint16x8_t foundBlk = vdupq_n_u16(0);                           \
+                const int nblocks = (ncol + QE_BLK - 1) / QE_BLK;               \
+                for (int b = 0; b < nblocks; b++) {                             \
+                    uint16x8_t reached = vceqq_s16(vld1q_s16(__bmax + b * SIMD_WIDTH16), __imax); \
+                    uint16x8_t newly = vandq_u16(vbicq_u16(reached, foundBlk), cmp0_active); \
+                    foundBlk = vorrq_u16(foundBlk, reached);                    \
+                    if (vmaxvq_u16(newly)) {                                    \
+                        const int j0 = b * QE_BLK;                              \
+                        const int j1 = (j0 + QE_BLK < ncol) ? (j0 + QE_BLK) : ncol; \
+                        uint16x8_t got = vdupq_n_u16(0);                        \
+                        for (int j2 = j0; j2 < j1; j2++) {                      \
+                            uint16x8_t eq = vandq_u16(                          \
+                                vceqq_s16(vld1q_s16(__hbase + j2 * SIMD_WIDTH16), __imax), newly); \
+                            uint16x8_t first = vbicq_u16(eq, got);              \
+                            iqe_vec = vbslq_s16(first, vld1q_s16(colIdx + j2 * SIMD_WIDTH16), iqe_vec); \
+                            got = vorrq_u16(got, eq);                           \
+                        }                                                       \
+                    }                                                           \
+                    if (!vmaxvq_u16(vbicq_u16(cmp0_active, foundBlk))) break;   \
+                }                                                               \
+                qe_vec = vbslq_s16(cmp0_active, iqe_vec, qe_vec);               \
+            }                                                                   \
+        } else {                                                                \
+            qe_vec = vbslq_s16(cmp0_active, (EPI_COL), qe_vec);                 \
+        }                                                                       \
+        /* Freeze newly endsc-qualifying lanes (has_endsc gate prevents     \
+         * trivial freeze for lanes without a KSW_XSTOP target). */           \
+        uint16x8_t cmp_end  = vcgeq_s16(gmax_vec, endsc_vec);                   \
+        uint16x8_t just_hit = vandq_u16(cmp_end, vreinterpretq_u16_s16(has_endsc_vec)); \
+        frozen_vec = vorrq_s16(frozen_vec, vreinterpretq_s16_u16(just_hit));    \
+        /* Collapse frozen_vec (lanes are 0x0000 or 0xFFFF) to an 8-bit mask: \
+         * bit l set iff lane l has hit its KSW_XSTOP target. */              \
+        frozen_bits = (uint8_t)_mm_movemask_epi16(vreinterpretq_m128i_s16(frozen_vec)); \
+    }
+    /* Early exit only when every lane that *could* freeze has frozen -- i.e.
+     * all KSW_XSTOP-carrying lanes are done. Non-XSTOP lanes (endsc_msk_a bit
+     * clear) never contribute to frozen_bits, so the batched break matches
+     * scalar ksw_i16 (no batched global exit). */
+#define KSWV_16_ALL_FROZEN() (endsc_msk_a != 0 && (frozen_bits & endsc_msk_a) == endsc_msk_a)
+
+    /* One DP cell of the one-row sweep. APPLY_BND / BND as in the u8 kernel. */
+#define KSWV_NEON_16_CELL(APPLY_BND, BND)                                       \
+    {                                                                           \
+        int16x8_t h00 = vld1q_s16(H0 + j * SIMD_WIDTH16);                       \
+        int16x8_t s2  = vld1q_s16(seq2SoA + j * SIMD_WIDTH16);                  \
+        int16x8_t f11 = vld1q_s16(F + (j + 1) * SIMD_WIDTH16);                  \
+        int16x8_t sbt;                                                          \
+        KSWV16_SBT(s1, s2, sbt, active_frread16);                               \
+        int16x8_t m11 = vaddq_s16(h00, sbt);                                    \
+        if (APPLY_BND) m11 = KSWV16_ZERO_BND(m11, (BND));                       \
+        /* h11 = max(m11, e11, f11, 0); me/mf reuse the clamped partial        \
+         * maxima for the reassociated gap recurrences (me reads OLD e11). */  \
+        int16x8_t me  = vmaxq_s16(vmaxq_s16(m11, e11), zero_vec);               \
+        int16x8_t h11 = vmaxq_s16(me, f11);                                     \
+        imax_vec = vmaxq_s16(imax_vec, h11);                                    \
+        int16x8_t mf  = vmaxq_s16(vmaxq_s16(m11, f11), zero_vec);               \
+        e11 = vmaxq_s16(vsubq_s16(mf, oe_ins_vec), vsubq_s16(e11, e_ins_vec));  \
+        int16x8_t f21 = vmaxq_s16(vsubq_s16(me, oe_del_vec),                    \
+                                  vsubq_s16(f11, e_del_vec));                   \
+        vst1q_s16(H1 + (j + 1) * SIMD_WIDTH16, h11);                            \
+        vst1q_s16(F  + (j + 1) * SIMD_WIDTH16, f21);                            \
+        if (j == qeNext) {                                                      \
+            vst1q_s16(blockMax + qeBlk * SIMD_WIDTH16, imax_vec);               \
+            qeBlk++; qeNext += QE_BLK;                                          \
+        }                                                                       \
+    }
+
+    /* Two-target-row cell: rows i and i+1 at column j in one body; the int16
+     * twin of KSWV_NEON_U8_CELL_PAIR. Row i's diagonal is H0[j]; row i+1's is
+     * row i's previous-column H (d1, register) and its vertical carry is row
+     * i's f21_0 (register). LazyQE writes row i's H back into the dead
+     * diagonal slot H0[j] for the post-row rescan and checkpoints both rows'
+     * running maxima; otherwise the argmax column is tracked inline (l_vec). */
+#define KSWV_NEON_16_CELL_PAIR(APPLY_BND, BND0, BND1)                           \
+    {                                                                           \
+        int16x8_t s2  = vld1q_s16(seq2SoA + j * SIMD_WIDTH16);                  \
+        int16x8_t f11 = vld1q_s16(F + (j + 1) * SIMD_WIDTH16);                  \
+        int16x8_t h00 = vld1q_s16(H0 + j * SIMD_WIDTH16);                       \
+        /* ---- Row i (diagonal H0[j]) ---- */                                  \
+        int16x8_t sbt0;                                                         \
+        KSWV16_SBT(s1_0, s2, sbt0, active_frread_0);                            \
+        int16x8_t m11_0 = vaddq_s16(h00, sbt0);                                 \
+        if (APPLY_BND) m11_0 = KSWV16_ZERO_BND(m11_0, (BND0));                  \
+        int16x8_t me0  = vmaxq_s16(vmaxq_s16(m11_0, e11_0), zero_vec);          \
+        int16x8_t h11_0 = vmaxq_s16(me0, f11);                                  \
+        if (LazyQE) vst1q_s16(H0 + j * SIMD_WIDTH16, h11_0);                    \
+        else col0 = vbslq_s16(vcgtq_s16(h11_0, imax0), l_vec, col0);            \
+        imax0 = vmaxq_s16(imax0, h11_0);                                        \
+        int16x8_t mf0  = vmaxq_s16(vmaxq_s16(m11_0, f11), zero_vec);            \
+        e11_0 = vmaxq_s16(vsubq_s16(mf0, oe_ins_vec), vsubq_s16(e11_0, e_ins_vec)); \
+        int16x8_t f21_0 = vmaxq_s16(vsubq_s16(me0, oe_del_vec),                 \
+                                    vsubq_s16(f11, e_del_vec));                 \
+        /* ---- Row i+1 (diagonal d1 = row i's prev-col H; vcarry f21_0) --- */ \
+        int16x8_t sbt1;                                                         \
+        KSWV16_SBT(s1_1, s2, sbt1, active_frread_1);                            \
+        int16x8_t m11_1 = vaddq_s16(d1, sbt1);                                  \
+        if (APPLY_BND) m11_1 = KSWV16_ZERO_BND(m11_1, (BND1));                  \
+        int16x8_t me1  = vmaxq_s16(vmaxq_s16(m11_1, e11_1), zero_vec);          \
+        int16x8_t h11_1 = vmaxq_s16(me1, f21_0);                                \
+        if (!LazyQE) col1 = vbslq_s16(vcgtq_s16(h11_1, imax1), l_vec, col1);    \
+        imax1 = vmaxq_s16(imax1, h11_1);                                        \
+        int16x8_t mf1  = vmaxq_s16(vmaxq_s16(m11_1, f21_0), zero_vec);          \
+        e11_1 = vmaxq_s16(vsubq_s16(mf1, oe_ins_vec), vsubq_s16(e11_1, e_ins_vec)); \
+        int16x8_t f21_1 = vmaxq_s16(vsubq_s16(me1, oe_del_vec),                 \
+                                    vsubq_s16(f21_0, e_del_vec));               \
+        vst1q_s16(H1 + (j + 1) * SIMD_WIDTH16, h11_1);                          \
+        vst1q_s16(F  + (j + 1) * SIMD_WIDTH16, f21_1);                          \
+        d1 = h11_0;                                                             \
+        if (LazyQE) {                                                           \
+            if (j == qeNext) {                                                  \
+                vst1q_s16(blockMax  + qeBlk * SIMD_WIDTH16, imax0);             \
+                vst1q_s16(blockMax1 + qeBlk * SIMD_WIDTH16, imax1);             \
+                qeBlk++; qeNext += QE_BLK;                                      \
+            }                                                                   \
+        } else {                                                                \
+            l_vec = vaddq_s16(l_vec, one_vec);                                  \
+        }                                                                       \
+    }
+
+    int i = 0, limit = nrow;
+    while (i < nrow) {
+        /* ---- Two-target-row fast path: a full pair remains AND both rows lie
+         * on the same side of minLen1 (see the u8 kernel). ---- */
+        if (RowPair && i + 1 < nrow && ((i + 1 < minLen1) || (i >= minLen1))) {
+            const int16x8_t s1_0 = vld1q_s16(seq1SoA + (i + 0) * SIMD_WIDTH16);
+            const int16x8_t s1_1 = vld1q_s16(seq1SoA + (i + 1) * SIMD_WIDTH16);
+            int16x8_t imax0 = zero_vec, imax1 = zero_vec;
+            int16x8_t col0 = zero_vec, col1 = zero_vec;
+            int16x8_t e11_0 = zero_vec, e11_1 = zero_vec;
+            int16x8_t d1 = zero_vec, l_vec = zero_vec;
+            int qeNext = QE_BLK - 1, qeBlk = 0;
+            (void) qeNext; (void) qeBlk;
+
+            /* Rank-1 freed-cell override per row (see the one-row body). */
+            int16x8_t freedval_vec16, active_frread_0, active_frread_1;
+            if (HasFreed) {
+                freedval_vec16 = vdupq_n_s16((int16_t)fr_val);
+                const int16x8_t frv  = vdupq_n_s16((int16_t)fr_ref);
+                const int16x8_t frv2 = vdupq_n_s16((int16_t)fr_ref2);
+                const int16x8_t frd  = vdupq_n_s16((int16_t)fr_read);
+                const int16x8_t frd2 = vdupq_n_s16((int16_t)fr_read2);
+                const int16x8_t fin  = vdupq_n_s16((int16_t)FREED_INACTIVE16);
+                active_frread_0 = vbslq_s16(vceqq_s16(s1_0, frv2), frd2, fin);
+                active_frread_0 = vbslq_s16(vceqq_s16(s1_0, frv),  frd, active_frread_0);
+                active_frread_1 = vbslq_s16(vceqq_s16(s1_1, frv2), frd2, fin);
+                active_frread_1 = vbslq_s16(vceqq_s16(s1_1, frv),  frd, active_frread_1);
+            }
+
+            int j = 0;
+            if (i + 1 < minLen1) {
+                for (; j < jsplit; j++)
+                    KSWV_NEON_16_CELL_PAIR(false, zero_u16, zero_u16)
+            } else {
+                const uint16x8_t rb0 = KSWV16_BND(s1_0);
+                const uint16x8_t rb1 = KSWV16_BND(s1_1);
+                for (; j < jsplit; j++)
+                    KSWV_NEON_16_CELL_PAIR(true, rb0, rb1)
+            }
+            for (; j < ncol; j++)
+                KSWV_NEON_16_CELL_PAIR(true,
+                                       KSWV16_BND(vorrq_s16(s1_0, s2)),
+                                       KSWV16_BND(vorrq_s16(s1_1, s2)))
+
+            /* Row epilogues in row order (a freeze at row i must suppress row
+             * i+1). LazyQE rescans row i from the in-place H0 (column j at
+             * index j) and row i+1 from H1 (column j at index j+1). */
+            if (LazyQE) {
+                KSWV_16_EPILOGUE(i, imax0, false, zero_vec, blockMax, H0)
+                if (KSWV_16_ALL_FROZEN()) { limit = i; i += 1; break; }
+                KSWV_16_EPILOGUE(i + 1, imax1, false, zero_vec, blockMax1, H1 + SIMD_WIDTH16)
+                if (KSWV_16_ALL_FROZEN()) { limit = i + 1; i += 2; break; }
+                /* Restore the column -1 boundary the in-place store clobbered. */
+                vst1q_s16(H0, zero_vec);
+            } else {
+                KSWV_16_EPILOGUE(i, imax0, true, col0, blockMax, H1 + SIMD_WIDTH16)
+                if (KSWV_16_ALL_FROZEN()) { limit = i; i += 1; break; }
+                KSWV_16_EPILOGUE(i + 1, imax1, true, col1, blockMax, H1 + SIMD_WIDTH16)
+                if (KSWV_16_ALL_FROZEN()) { limit = i + 1; i += 2; break; }
+            }
+            (void) col0; (void) col1; (void) l_vec;
+
+            int16_t *S = H1; H1 = H0; H0 = S;
+            i += 2;
+            continue;
+        }
+
+        /* ---- One-row sweep (always lazy) ---- */
         int16x8_t e11 = zero_vec;
-        int16x8_t s1  = vld1q_s16(seq1SoA + i * SIMD_WIDTH16);
-        imax_vec = zero_vec;
-        int16x8_t iqe_vec = vdupq_n_s16(-1);
-        int16x8_t l_vec   = zero_vec;
-        int16x8_t i_vec   = vdupq_n_s16((int16_t)i);
+        const int16x8_t s1 = vld1q_s16(seq1SoA + i * SIMD_WIDTH16);
+        int16x8_t imax_vec = zero_vec;
+        int qeNext = QE_BLK - 1, qeBlk = 0;
 
         /* Rank-1 freed-cell override (issue 173 + TAPS neutral), folded into ONE
          * per-row target base active_frread16 — the u16 analog of
@@ -1793,7 +2092,7 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
          * sbt directly), so the freed value is just fr_val: fr_val == w_match
          * (GENOMIC/COLLAPSED) equals temp8[0], NEUTRAL (fr_val==0) scores the
          * conversion as 0. Sign-extended to int16. When !HasFreed, this and the
-         * per-cell block below compile out. */
+         * per-cell block compile out. */
         int16x8_t freedval_vec16, active_frread16;
         if (HasFreed) {
             freedval_vec16 = vdupq_n_s16((int16_t)fr_val);
@@ -1805,107 +2104,31 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
                                         active_frread16);
         }
 
-        for (int j = 0; j < ncol; j++) {
-            int16x8_t h00 = vld1q_s16(H0 + j * SIMD_WIDTH16);
-            int16x8_t s2  = vld1q_s16(seq2SoA + j * SIMD_WIDTH16);
-            int16x8_t f11 = vld1q_s16(F + (j + 1) * SIMD_WIDTH16);
-
-            int16x8_t xor_val = veorq_s16(s1, s2);
-            /* 8-lane int16 table lookup. Narrow xor (int16x8, values in
-             * [0..31]) to 8 u8 indices (low byte of each int16; high byte
-             * is always 0 for these xor values). Look up in the 32-byte
-             * int8 score table via vqtbl2, sign-extend int8x8 back to
-             * int16x8. */
-            uint8x8_t  idx8 = vmovn_u16(vreinterpretq_u16_s16(xor_val));
-            int8x8_t   sbt8 = vqtbl2_s8(perm_vec, idx8);
-            int16x8_t  sbt  = vmovl_s8(sbt8);
-
-            /* Rank-1 freed-cell override (issue 173 + TAPS neutral): force the
-             * freed score where this column's read base equals the row's active
-             * freed base (built once per row in active_frread16 above). One compare
-             * + one blend; FREED_INACTIVE16 lanes never match a real s2 so they
-             * pass through. */
-            if (HasFreed) {
-                sbt = vbslq_s16(vceqq_s16(s2, active_frread16), freedval_vec16, sbt);
-            }
-
-            /* Boundary: high bit set in (s1 | s2) indicates padding. */
-            int16x8_t or_val = vorrq_s16(s1, s2);
-            uint16x8_t high_bit = vshrq_n_u16(vreinterpretq_u16_s16(or_val), 15);
-            uint16x8_t is_boundary = vceqq_u16(high_bit, vdupq_n_u16(1));
-
-            int16x8_t m11 = vaddq_s16(h00, sbt);
-            m11 = vbslq_s16(is_boundary, zero_vec, m11);
-
-            int16x8_t h11 = vmaxq_s16(m11, e11);
-            h11 = vmaxq_s16(h11, f11);
-            h11 = vmaxq_s16(h11, zero_vec);
-
-            uint16x8_t cmp0 = vcgtq_s16(h11, imax_vec);
-            imax_vec = vmaxq_s16(imax_vec, h11);
-            iqe_vec  = vbslq_s16(cmp0, l_vec, iqe_vec);
-
-            /* Reassociate both gap recurrences off h11 (variant C: h11 is
-             * clamped to 0 above, so fold that 0 into mf/me to preserve the
-             * floor). me reads OLD e11 — compute before the e-update. */
-            int16x8_t mf = vmaxq_s16(vmaxq_s16(m11, f11), zero_vec);
-            int16x8_t me = vmaxq_s16(vmaxq_s16(m11, e11), zero_vec);
-            int16x8_t gapE = vsubq_s16(mf, oe_ins_vec);
-            e11 = vsubq_s16(e11, e_ins_vec);
-            e11 = vmaxq_s16(gapE, e11);
-
-            int16x8_t gapD = vsubq_s16(me, oe_del_vec);
-            int16x8_t f21  = vsubq_s16(f11, e_del_vec);
-            f21 = vmaxq_s16(gapD, f21);
-
-            vst1q_s16(H1 + (j + 1) * SIMD_WIDTH16, h11);
-            vst1q_s16(F  + (j + 1) * SIMD_WIDTH16, f21);
-            l_vec = vaddq_s16(l_vec, one_vec);
+        int j = 0;
+        if (i < minLen1) {
+            for (; j < jsplit; j++)
+                KSWV_NEON_16_CELL(false, zero_u16)
+        } else {
+            const uint16x8_t rowboundary = KSWV16_BND(s1);
+            for (; j < jsplit; j++)
+                KSWV_NEON_16_CELL(true, rowboundary)
         }
+        for (; j < ncol; j++)
+            KSWV_NEON_16_CELL(true, KSWV16_BND(vorrq_s16(s1, s2)))
 
-        /* Block I: write prior-row's pimax to rowMax. No intermediate
-         * masking — frozen lanes' imax after the freeze row is still
-         * produced by the DP but the score2 scan filters by per-lane
-         * primary region / minsc / qe, which matches scalar. */
-        if (i > 0) {
-            vst1q_s16(rowMax + (i - 1) * SIMD_WIDTH16, pimax_vec);
-        }
-        pimax_vec = imax_vec;
-
-        /* Block II: gmax / te / qe update with per-lane freeze mask. */
-        uint16x8_t cmp0 = vcgtq_s16(imax_vec, gmax_vec);
-        uint16x8_t frozen_u16 = vreinterpretq_u16_s16(frozen_vec);
-        uint16x8_t cmp0_active = vbicq_u16(cmp0, frozen_u16);
-
-        int16x8_t new_gmax = vmaxq_s16(gmax_vec, imax_vec);
-        gmax_vec = vbslq_s16(frozen_u16, gmax_vec, new_gmax);
-
-        te_vec = vbslq_s16(cmp0_active, i_vec, te_vec);
-        qe_vec = vbslq_s16(cmp0_active, iqe_vec, qe_vec);
-
-        /* Freeze newly endsc-qualifying lanes (has_endsc gate prevents
-         * trivial freeze for lanes without a KSW_XSTOP target). */
-        uint16x8_t cmp_end   = vcgeq_s16(gmax_vec, endsc_vec);
-        uint16x8_t just_hit  = vandq_u16(cmp_end, vreinterpretq_u16_s16(has_endsc_vec));
-        frozen_vec = vorrq_s16(frozen_vec, vreinterpretq_s16_u16(just_hit));
-
-        /* Collapse frozen_vec (lanes are 0x0000 or 0xFFFF) to an 8-bit
-         * mask: bit l set iff lane l has hit its KSW_XSTOP target. Uses
-         * the existing _mm_movemask_epi16 helper (extracts each u16
-         * MSB), avoiding the scalar store+loop round-trip. */
-        uint8_t frozen_bits = (uint8_t)_mm_movemask_epi16(vreinterpretq_m128i_s16(frozen_vec));
-
-        /* Early exit only when every lane that *could* freeze has frozen
-         * — i.e. all KSW_XSTOP-carrying lanes are done. Non-XSTOP lanes
-         * (endsc_msk_a bit clear) never contribute to frozen_bits, so the
-         * batched break matches scalar ksw_i16 (no batched global exit). */
-        if (endsc_msk_a != 0 && (frozen_bits & endsc_msk_a) == endsc_msk_a) {
-            limit = i++;
-            break;
-        }
+        KSWV_16_EPILOGUE(i, imax_vec, false, zero_vec, blockMax, H1 + SIMD_WIDTH16)
+        if (KSWV_16_ALL_FROZEN()) { limit = i; i += 1; break; }
 
         int16_t *S = H1; H1 = H0; H0 = S;
+        i += 1;
     }
+#undef KSWV_NEON_16_CELL_PAIR
+#undef KSWV_NEON_16_CELL
+#undef KSWV_16_ALL_FROZEN
+#undef KSWV_16_EPILOGUE
+#undef KSWV16_SBT
+#undef KSWV16_ZERO_BND
+#undef KSWV16_BND
 
     /* Store final row's pimax. Guard on i > 0 for all-padding batches
      * (nrow == 0 → i stays at 0 → underflow). See issue 38 / PR 289. */

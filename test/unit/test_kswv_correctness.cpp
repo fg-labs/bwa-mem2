@@ -32,6 +32,7 @@ std::vector<bwa_tests::TestPair> build_edge_cases(std::mt19937 &rng) {
     using bwa_tests::gen_sub_cluster_pair;
     using bwa_tests::gen_with_n_bases_pair;
     using bwa_tests::gen_random_pair;
+    using bwa_tests::gen_tandem_repeat_pair;
 
     std::vector<bwa_tests::TestPair> pairs;
     pairs.push_back(gen_exact_match_pair(50));
@@ -48,6 +49,17 @@ std::vector<bwa_tests::TestPair> build_edge_cases(std::mt19937 &rng) {
     pairs.push_back(gen_with_n_bases_pair(rng, 100, 150, 20));
     pairs.push_back(gen_random_pair(rng, 20, 40));
     pairs.push_back(gen_random_pair(rng, 10, 30));
+    // Odd query lengths so a column range ends on an odd count and the two-row
+    // sweep hits its odd-tail branch (partial final block / biased-body jdummy).
+    // 100/150 alone leave even partial blocks (100%16=4, 150%16=6).
+    pairs.push_back(gen_random_pair(rng, 101, 151));
+    pairs.push_back(gen_random_pair(rng, 151, 201));
+    pairs.push_back(gen_random_pair(rng, 157, 200));
+    // Tandem repeats give a genuine suboptimal alignment, so score2/te2 are
+    // exercised (random pairs rarely have a meaningful second-best).
+    pairs.push_back(gen_tandem_repeat_pair(rng, 100, 150));
+    pairs.push_back(gen_tandem_repeat_pair(rng, 101, 157));
+    pairs.push_back(gen_tandem_repeat_pair(rng, 128, 200));
     return pairs;
 }
 
@@ -60,6 +72,38 @@ std::vector<bwa_tests::TestPair> build_bulk_random(std::mt19937 &rng, int n) {
         pairs.push_back(bwa_tests::gen_random_pair(rng, qlen_d(rng), rlen_d(rng)));
     }
     return pairs;
+}
+
+// RAII override of an environment variable: set on construction, restore the
+// prior value (or unset if it was absent) on destruction, so doctest run order
+// cannot leak an override into a sibling case that assumes the defaults.
+class ScopedEnv {
+public:
+    ScopedEnv(const char *name, const char *value) : name_(name) {
+        const char *cur = getenv(name);
+        had_ = cur != nullptr;
+        if (had_) saved_ = cur;
+        setenv(name, value, 1);
+    }
+    ~ScopedEnv() {
+        if (had_) setenv(name_.c_str(), saved_.c_str(), 1);
+        else      unsetenv(name_.c_str());
+    }
+    ScopedEnv(const ScopedEnv &) = delete;
+    ScopedEnv &operator=(const ScopedEnv &) = delete;
+private:
+    std::string name_;
+    std::string saved_;
+    bool had_ = false;
+};
+
+// Strict all-field kswr_t equality (every observable field). For A/B arms that
+// run the same recurrence and so must agree exactly -- not the tolerant
+// scalar-vs-batched compare in kswr_cmp.h.
+inline bool kswr_all_fields_eq(const kswr_t &a, const kswr_t &b) {
+    return a.score == b.score && a.te == b.te && a.qe == b.qe
+        && a.score2 == b.score2 && a.te2 == b.te2
+        && a.tb == b.tb && a.qb == b.qb;
 }
 
 } // namespace
@@ -278,19 +322,17 @@ TEST_CASE("kswv u8 rescue: BWA3_RESCUE_ROWPAIR off == on, and one-row matches sc
     scalar_aln.reserve(pairs.size());
     for (const auto &p : pairs) scalar_aln.push_back(bwa_tests::run_scalar_ksw(p, mat));
 
-    // Save/restore the caller's env so doctest run order can't leak the override
-    // into a sibling case that assumes the default (pairing on).
-    const char *saved = getenv("BWA3_RESCUE_ROWPAIR");
-    const std::string saved_val = saved ? saved : "";
-    const bool had_saved = saved != nullptr;
-
-    setenv("BWA3_RESCUE_ROWPAIR", "0", 1);
-    auto one_row = bwa_tests::run_kswv_batch(pairs, mat);
-    setenv("BWA3_RESCUE_ROWPAIR", "1", 1);
-    auto two_row = bwa_tests::run_kswv_batch(pairs, mat);
-
-    if (had_saved) setenv("BWA3_RESCUE_ROWPAIR", saved_val.c_str(), 1);
-    else           unsetenv("BWA3_RESCUE_ROWPAIR");
+    // ScopedEnv save/restores the caller's env so doctest run order can't leak
+    // the override into a sibling case that assumes the default (pairing on).
+    std::vector<kswr_t> one_row, two_row;
+    {
+        ScopedEnv rp("BWA3_RESCUE_ROWPAIR", "0");
+        one_row = bwa_tests::run_kswv_batch(pairs, mat);
+    }
+    {
+        ScopedEnv rp("BWA3_RESCUE_ROWPAIR", "1");
+        two_row = bwa_tests::run_kswv_batch(pairs, mat);
+    }
 
     REQUIRE(one_row.size() == pairs.size());
     REQUIRE(two_row.size() == pairs.size());
@@ -301,9 +343,7 @@ TEST_CASE("kswv u8 rescue: BWA3_RESCUE_ROWPAIR off == on, and one-row matches sc
         const kswr_t &b = two_row[i];
         // (1) Strict all-field A/B: rowpair is the same kernel row-blocked, so the
         // two arms must match exactly -- not the scalar-vs-batched tolerant compare.
-        const bool eq = a.score == b.score && a.te == b.te && a.qe == b.qe
-                     && a.score2 == b.score2 && a.te2 == b.te2
-                     && a.tb == b.tb && a.qb == b.qb;
+        const bool eq = kswr_all_fields_eq(a, b);
         if (!eq) {
             ++drift;
             CAPTURE(i); CAPTURE(pairs[i].tag);
@@ -359,25 +399,21 @@ TEST_CASE("kswv u8 rescue: BWA3_RESCUE_LAZYQE off == on in the two-row sweep, an
     scalar_aln.reserve(pairs.size());
     for (const auto &p : pairs) scalar_aln.push_back(bwa_tests::run_scalar_ksw(p, mat));
 
-    // Save/restore both env vars so doctest run order cannot leak an override
-    // into a sibling case that assumes the defaults (pairing on, lazy on).
-    const char *saved_rp = getenv("BWA3_RESCUE_ROWPAIR");
-    const std::string saved_rp_val = saved_rp ? saved_rp : "";
-    const bool had_rp = saved_rp != nullptr;
-    const char *saved_lq = getenv("BWA3_RESCUE_LAZYQE");
-    const std::string saved_lq_val = saved_lq ? saved_lq : "";
-    const bool had_lq = saved_lq != nullptr;
-
-    setenv("BWA3_RESCUE_ROWPAIR", "1", 1);
-    setenv("BWA3_RESCUE_LAZYQE", "0", 1);
-    auto inline_qe = bwa_tests::run_kswv_batch(pairs, mat);
-    setenv("BWA3_RESCUE_LAZYQE", "1", 1);
-    auto lazy_qe = bwa_tests::run_kswv_batch(pairs, mat);
-
-    if (had_rp) setenv("BWA3_RESCUE_ROWPAIR", saved_rp_val.c_str(), 1);
-    else        unsetenv("BWA3_RESCUE_ROWPAIR");
-    if (had_lq) setenv("BWA3_RESCUE_LAZYQE", saved_lq_val.c_str(), 1);
-    else        unsetenv("BWA3_RESCUE_LAZYQE");
+    // ScopedEnv save/restores both vars so doctest run order cannot leak an
+    // override into a sibling case that assumes the defaults (pairing on, lazy
+    // on). Pairing is held ON so the lazy toggle is the only difference.
+    std::vector<kswr_t> inline_qe, lazy_qe;
+    {
+        ScopedEnv rp("BWA3_RESCUE_ROWPAIR", "1");
+        {
+            ScopedEnv lq("BWA3_RESCUE_LAZYQE", "0");
+            inline_qe = bwa_tests::run_kswv_batch(pairs, mat);
+        }
+        {
+            ScopedEnv lq("BWA3_RESCUE_LAZYQE", "1");
+            lazy_qe = bwa_tests::run_kswv_batch(pairs, mat);
+        }
+    }
 
     REQUIRE(inline_qe.size() == pairs.size());
     REQUIRE(lazy_qe.size() == pairs.size());
@@ -386,9 +422,7 @@ TEST_CASE("kswv u8 rescue: BWA3_RESCUE_LAZYQE off == on in the two-row sweep, an
     for (size_t i = 0; i < pairs.size(); i++) {
         const kswr_t &a = inline_qe[i];
         const kswr_t &b = lazy_qe[i];
-        const bool eq = a.score == b.score && a.te == b.te && a.qe == b.qe
-                     && a.score2 == b.score2 && a.te2 == b.te2
-                     && a.tb == b.tb && a.qb == b.qb;
+        const bool eq = kswr_all_fields_eq(a, b);
         if (!eq) {
             ++drift;
             CAPTURE(i); CAPTURE(pairs[i].tag);
@@ -408,6 +442,170 @@ TEST_CASE("kswv u8 rescue: BWA3_RESCUE_LAZYQE off == on in the two-row sweep, an
         }
     }
     MESSAGE("lazyqe off-vs-on drift=" << drift << ", inline vs scalar mism="
+            << oracle_mism << " over " << pairs.size() << " pairs");
+    CHECK(drift == 0);
+    CHECK(oracle_mism == 0);
+#endif
+}
+
+// The NEON 16-bit rescue kernel carries the same two-row sweep and lazy
+// query-end recovery as the u8 kernel, behind the same env toggles. Drive one
+// batch through getScores16 (use16 = true) in each of the three configurations
+// -- one-row, two-row inline, two-row lazy -- and require strict all-field
+// equality between them, with the one-row arm checked against the scalar
+// oracle. High-scoring pairs (long exact matches) make the 16-bit tier the
+// production route, but the kernel is exercised directly here regardless.
+TEST_CASE("kswv u16 rescue: ROWPAIR/LAZYQE configurations agree, and one-row matches scalar"
+          * doctest::test_suite("unit/kswv")) {
+
+#if !defined(__ARM_NEON) && !defined(__aarch64__)
+    MESSAGE("skipped: the toggles affect the NEON 16-bit rescue kernel only");
+    return;
+#else
+    auto mat = bwa_tests::build_scoring_matrix(1, 4, 1);
+
+    std::mt19937 rng(8642);
+    auto pairs = build_edge_cases(rng);
+    auto bulk  = build_bulk_random(rng, 300);
+    pairs.insert(pairs.end(), bulk.begin(), bulk.end());
+
+    std::vector<kswr_t> scalar_aln;
+    scalar_aln.reserve(pairs.size());
+    for (const auto &p : pairs) scalar_aln.push_back(bwa_tests::run_scalar_ksw(p, mat));
+
+    auto run16 = [&]() {
+        return bwa_tests::run_kswv_batch(pairs, mat,
+                                         bwa_tests::DEFAULT_GAP_OPEN,
+                                         bwa_tests::DEFAULT_GAP_EXTEND,
+                                         0, /*use16=*/true);
+    };
+    // ScopedEnv save/restores both vars across the three configurations.
+    std::vector<kswr_t> one_row, pair_inline, pair_lazy;
+    {
+        ScopedEnv rp("BWA3_RESCUE_ROWPAIR", "0");
+        ScopedEnv lq("BWA3_RESCUE_LAZYQE", "1");
+        one_row = run16();
+    }
+    {
+        ScopedEnv rp("BWA3_RESCUE_ROWPAIR", "1");
+        {
+            ScopedEnv lq("BWA3_RESCUE_LAZYQE", "0");
+            pair_inline = run16();
+        }
+        {
+            ScopedEnv lq("BWA3_RESCUE_LAZYQE", "1");
+            pair_lazy = run16();
+        }
+    }
+
+    REQUIRE(one_row.size() == pairs.size());
+    REQUIRE(pair_inline.size() == pairs.size());
+    REQUIRE(pair_lazy.size() == pairs.size());
+
+    auto same = [](const kswr_t &a, const kswr_t &b) {
+        return kswr_all_fields_eq(a, b);
+    };
+    int drift_inline = 0, drift_lazy = 0, oracle_mism = 0;
+    for (size_t i = 0; i < pairs.size(); i++) {
+        const kswr_t &a = one_row[i];
+        if (!same(a, pair_inline[i])) {
+            ++drift_inline;
+            CAPTURE(i); CAPTURE(pairs[i].tag);
+            CAPTURE(a.score); CAPTURE(pair_inline[i].score);
+            CAPTURE(a.te); CAPTURE(pair_inline[i].te); CAPTURE(a.qe); CAPTURE(pair_inline[i].qe);
+            CHECK(same(a, pair_inline[i]));
+        }
+        if (!same(a, pair_lazy[i])) {
+            ++drift_lazy;
+            CAPTURE(i); CAPTURE(pairs[i].tag);
+            CAPTURE(a.score); CAPTURE(pair_lazy[i].score);
+            CAPTURE(a.te); CAPTURE(pair_lazy[i].te); CAPTURE(a.qe); CAPTURE(pair_lazy[i].qe);
+            CHECK(same(a, pair_lazy[i]));
+        }
+        const bool o_score  = bwa_tests::kswr_score_eq(scalar_aln[i], a);
+        const bool o_coord  = bwa_tests::kswr_coords_eq(scalar_aln[i], a);
+        const bool o_score2 = bwa_tests::kswr_score2_eq(scalar_aln[i], a);
+        if (!(o_score && o_coord && o_score2)) {
+            ++oracle_mism;
+            CAPTURE(i); CAPTURE(pairs[i].tag);
+            CAPTURE(scalar_aln[i].score); CAPTURE(a.score);
+            CHECK(o_score); CHECK(o_coord); CHECK(o_score2);
+        }
+    }
+    MESSAGE("u16 one-row vs pair-inline drift=" << drift_inline
+            << ", vs pair-lazy drift=" << drift_lazy
+            << ", one-row vs scalar mism=" << oracle_mism
+            << " over " << pairs.size() << " pairs");
+    CHECK(drift_inline == 0);
+    CHECK(drift_lazy == 0);
+    CHECK(oracle_mism == 0);
+#endif
+}
+
+// The biased u8 body (BWA3_RESCUE_USQADD=0) is a distinct instantiation: it
+// replaces the saturating add with add+bias+saturating-subtract and splits the
+// column range at a data-dependent jdummy, whose partial final block can be an
+// odd column count -- the exact path the two-column unroll's odd-tail branch
+// (`if (j < jend_) { ...; d1 = d1b; }`) handles. No other case drives USQADD=0.
+// Pairing is held ON so it is the two-row biased body (and its odd tail) that
+// USQADD toggles; the odd query lengths in build_edge_cases make the tail odd.
+// Strict all-field A/B against the default (saturating) arm, plus the biased arm
+// against the independent scalar oracle.
+TEST_CASE("kswv u8 rescue: BWA3_RESCUE_USQADD off == on, and biased body matches scalar"
+          * doctest::test_suite("unit/kswv")) {
+#if !defined(__ARM_NEON) && !defined(__aarch64__)
+    MESSAGE("skipped: BWA3_RESCUE_USQADD affects the NEON u8 rescue kernel only");
+    return;
+#else
+    auto mat = bwa_tests::build_scoring_matrix(1, 4, 1);
+
+    std::mt19937 rng(2468);
+    auto pairs = build_edge_cases(rng);
+    auto bulk  = build_bulk_random(rng, 300);
+    pairs.insert(pairs.end(), bulk.begin(), bulk.end());
+
+    std::vector<kswr_t> scalar_aln;
+    scalar_aln.reserve(pairs.size());
+    for (const auto &p : pairs) scalar_aln.push_back(bwa_tests::run_scalar_ksw(p, mat));
+
+    std::vector<kswr_t> biased, saturating;
+    {
+        ScopedEnv rp("BWA3_RESCUE_ROWPAIR", "1");
+        {
+            ScopedEnv uq("BWA3_RESCUE_USQADD", "0");
+            biased = bwa_tests::run_kswv_batch(pairs, mat);
+        }
+        {
+            ScopedEnv uq("BWA3_RESCUE_USQADD", "1");
+            saturating = bwa_tests::run_kswv_batch(pairs, mat);
+        }
+    }
+
+    REQUIRE(biased.size() == pairs.size());
+    REQUIRE(saturating.size() == pairs.size());
+
+    int drift = 0, oracle_mism = 0;
+    for (size_t i = 0; i < pairs.size(); i++) {
+        const kswr_t &a = biased[i];
+        const kswr_t &b = saturating[i];
+        if (!kswr_all_fields_eq(a, b)) {
+            ++drift;
+            CAPTURE(i); CAPTURE(pairs[i].tag);
+            CAPTURE(a.score); CAPTURE(b.score);
+            CAPTURE(a.te); CAPTURE(b.te); CAPTURE(a.qe); CAPTURE(b.qe);
+            CHECK(kswr_all_fields_eq(a, b));
+        }
+        const bool o_score  = bwa_tests::kswr_score_eq(scalar_aln[i], a);
+        const bool o_coord  = bwa_tests::kswr_coords_eq(scalar_aln[i], a);
+        const bool o_score2 = bwa_tests::kswr_score2_eq(scalar_aln[i], a);
+        if (!(o_score && o_coord && o_score2)) {
+            ++oracle_mism;
+            CAPTURE(i); CAPTURE(pairs[i].tag);
+            CAPTURE(scalar_aln[i].score); CAPTURE(a.score);
+            CHECK(o_score); CHECK(o_coord); CHECK(o_score2);
+        }
+    }
+    MESSAGE("usqadd off-vs-on drift=" << drift << ", biased vs scalar mism="
             << oracle_mism << " over " << pairs.size() << " pairs");
     CHECK(drift == 0);
     CHECK(oracle_mism == 0);
