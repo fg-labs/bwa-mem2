@@ -186,6 +186,21 @@ else
     fail "backwardext_konly_parity_test: non-zero exit"
 fi
 
+# --- sa_lookup_sentinel_parity_test ---------------------------------------
+# Prefetch SA-lookup pipeline (get_sa_entries_prefetch/call_one_step) vs the
+# scalar get_sa_entry_compressed over EVERY suffix-array row. The sentinel ($)
+# row is where call_one_step dropped the accumulated LF offset (reported hits in
+# the first few bases of the concatenated reference too far left); this sweep
+# catches that row and is byte-identical elsewhere.
+if OUT="$(cd "$HERE" && ./sa_lookup_sentinel_parity_test "$FIXTURES/phix.fa" 2>&1)"; then
+    echo "$OUT" | grep -q "^PASS:" \
+        || fail "sa_lookup_sentinel_parity_test: no PASS line"
+    ok "sa_lookup_sentinel_parity_test"
+else
+    echo "$OUT"
+    fail "sa_lookup_sentinel_parity_test: non-zero exit"
+fi
+
 # --- long-read end-to-end (issue 44) --------------------------------------
 # Pre-fix, reads > 151 bp overran the per-thread SMEM buffer (segfault) and
 # reads > 512 bp tripped the MAX_READ_LEN_FOR_LOCKSTEP assert. Post-fix the

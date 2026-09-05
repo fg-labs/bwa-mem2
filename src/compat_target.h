@@ -14,12 +14,13 @@
  * shaping and changes no alignment, no score and no flag -- and that remains
  * the rule a new field should expect to follow.
  *
- * The exception is `chain_flt_resurrect_empty`, and it exists because the rule
- * and the purpose collide: on that one path bwa and bwa-mem2 emit DIFFERENT
- * ALIGNMENTS for the same read, so a target that refused to model it would
- * reproduce neither faithfully. `--compat=bwa-mem` that returns bwa-mem2's
- * alignments is not a weaker guarantee, it is a false one. A row therefore
- * records whichever behavior ITS target has, alignment-affecting or not.
+ * The exceptions are `chain_flt_resurrect_empty` and `sa_sentinel_drop_offset`,
+ * and they exist because the rule and the purpose collide: on those paths bwa
+ * and bwa-mem2 emit DIFFERENT ALIGNMENTS for the same read, so a target that
+ * refused to model them would reproduce neither faithfully. `--compat=bwa-mem`
+ * that returns bwa-mem2's alignments is not a weaker guarantee, it is a false
+ * one. A row therefore records whichever behavior ITS target has,
+ * alignment-affecting or not.
  *
  * This does not license `--fast` or `--proper-pair-from-emitted` into a row:
  * those deviate from BOTH targets, so asking for target parity and for a
@@ -109,6 +110,24 @@ typedef struct compat_target_t {
      * `bwa-mem` does not, because reproducing bwa is the entire contract of
      * that target and on this path bwa leaves the read unmapped. */
     int chain_flt_resurrect_empty;
+
+    /* When the compressed suffix-array lookup's LF walk reaches the sentinel
+     * ($) row, report coordinate 0 (1) or the accumulated walk offset (0).
+     *
+     * The suffix at the sentinel row starts at text position 0, so a walk of
+     * `offset` steps that lands there belongs to text position `offset`. bwa's
+     * bwt_sa accounts for that (bwt_invPsi returns 0 at the primary and
+     * bwt->sa[0] = -1 compensates); bwa-mem2's pipelined lookup (call_one_step)
+     * set sa_entry = 0 there and dropped the walk, placing any hit whose walk
+     * reaches the sentinel before a sampled row up to `offset` bases too far
+     * left. Reachable only for hits in the first few bases of the concatenated
+     * reference (contig 0's opening bases), i.e. never on hg38, which opens
+     * with an N run, but real on small and custom references.
+     *
+     * `off` and `bwa-mem` report the correct coordinate; `bwa-mem2` keeps the
+     * drop, because reproducing bwa-mem2 v2.2.1's records is that target's
+     * contract and this is one of its alignments (fg-labs/bwa-mem3#469). */
+    int sa_sentinel_drop_offset;
 } compat_target_t;
 
 /* The `off` row: bwa-mem3's own native output. Never NULL on any mem_opt_t

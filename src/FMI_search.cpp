@@ -2053,6 +2053,16 @@ void FMI_search::sortSMEMs(SMEM *matchArray,
  * the SysV-ABI struct-by-value pass and return-slot store that dominate
  * self-time on gcc 12+. */
 
+/* Uncompressed SA accessors: these index sa_ms_byte[pos] / sa_ls_word[pos] by the
+ * raw BWT row. Under SA_COMPRESSION (the shipped build) those arrays are sized to
+ * reference_seq_len >> SA_COMPX, so a raw-row index reads ~SA_COMPX-fold out of
+ * bounds. They are only correct for a full (uncompressed) SA, and every in-tree
+ * caller is already guarded by `#if !SA_COMPRESSION` (see FMI_search.cpp's
+ * sentinel scan and bwamem.cpp's per-read SA resolve), so fence the definitions to
+ * match: under SA_COMPRESSION they must not be compiled or callable. The compressed
+ * paths (get_sa_entry_compressed / get_sa_entries(..., tid) / get_sa_entries_prefetch)
+ * below are the shipped equivalents. */
+#if !SA_COMPRESSION
 int64_t FMI_search::get_sa_entry(int64_t pos)
 {
     int64_t sa_entry = sa_ms_byte[pos];
@@ -2113,6 +2123,7 @@ void FMI_search::get_sa_entries(SMEM *smemArray, int64_t *coordArray, int32_t *c
         totalCoordCount += c;
     }
 }
+#endif // !SA_COMPRESSION
 
 // sa_compression
 int64_t FMI_search::get_sa_entry_compressed(int64_t pos, int tid)
@@ -2214,7 +2225,8 @@ void FMI_search::get_sa_entries(SMEM *smemArray, int64_t *coordArray, int32_t *c
 }
 
 // SA_COPMRESSION w/ PREFETCH
-int64_t FMI_search::call_one_step(int64_t pos, int64_t &sa_entry, int64_t &offset)
+int64_t FMI_search::call_one_step(int64_t pos, int64_t &sa_entry, int64_t &offset,
+                                  int drop_sentinel_offset)
 {
     if ((pos & sa_compx_mask) == 0) {        
         sa_entry = sa_ms_byte[pos >> sa_compx];        
@@ -2243,7 +2255,15 @@ int64_t FMI_search::call_one_step(int64_t pos, int64_t &sa_entry, int64_t &offse
         else
             b = 4;
         if (b == 4) {
-            sa_entry = 0;
+            // Sentinel ($) row: its suffix-array value is 0, and we have walked
+            // `offset` LF steps to reach it, so the SA entry is 0 + offset. The
+            // compressed sibling get_sa_entry_compressed returns `offset` here for
+            // the same reason. bwa-mem2 set sa_entry = 0 here, dropping the walk
+            // and reporting positions within the first `offset` bases of the
+            // concatenated reference up to `offset` bases too far left; that is
+            // kept only for --compat=bwa-mem2 (drop_sentinel_offset), whose
+            // contract is to reproduce bwa-mem2's records.
+            sa_entry = drop_sentinel_offset ? 0 : offset;
             return 1;
         }
         
@@ -2299,7 +2319,8 @@ struct SaPrefetchScratch {
 
 void FMI_search::get_sa_entries_prefetch(SMEM *smemArray, int64_t *coordArray,
                                          int64_t *coordCountArray, int64_t count,
-                                         const int32_t max_occ, int tid, int64_t &id_)
+                                         const int32_t max_occ, int tid, int64_t &id_,
+                                         int drop_sentinel_offset)
 {
 
     // uint32_t i;
@@ -2387,7 +2408,7 @@ void FMI_search::get_sa_entries_prefetch(SMEM *smemArray, int64_t *coordArray,
             int64_t sp = 0, pos = 0;
             bool quit;
             if (offset[k] >= 0) {
-                quit = call_one_step(working_set[k], sp, offset[k]);
+                quit = call_one_step(working_set[k], sp, offset[k], drop_sentinel_offset);
             }
             else
                 continue;

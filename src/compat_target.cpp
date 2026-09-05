@@ -26,6 +26,7 @@ const compat_target_t COMPAT_TARGET_OFF = {
     /* .emit_mq            */ 1,
     /* .emit_hn            */ 1,
     /* .chain_flt_resurrect_empty */ 1,   /* bwa-mem2 behavior: the drop-in default */
+    /* .sa_sentinel_drop_offset */ 0,     /* correct coordinate (matches bwa) */
 };
 
 /* --- `bwa-mem2`: bwa-mem2 v2.2.1 -----------------------------------------
@@ -50,6 +51,7 @@ static const compat_target_t COMPAT_TARGET_BWA_MEM2 = {
     /* .emit_mq            */ 0,
     /* .emit_hn            */ 0,
     /* .chain_flt_resurrect_empty */ 1,   /* seqid-range machinery synthesizes {0,1} */
+    /* .sa_sentinel_drop_offset */ 1,     /* bwa-mem2 call_one_step sets sa_entry = 0 */
 };
 
 /* --- `bwa-mem`: bwa 0.7.19 -------------------------------------------------
@@ -101,6 +103,7 @@ static const compat_target_t COMPAT_TARGET_BWA_MEM = {
     /* .emit_mq            */ 1,
     /* .emit_hn            */ 0,
     /* .chain_flt_resurrect_empty */ 0,   /* bwa returns 0; the read stays unmapped */
+    /* .sa_sentinel_drop_offset */ 0,     /* bwt_sa accounts for the walk offset */
 };
 
 /* Ordered as the diagnostics should read: real targets first, `off` last. */

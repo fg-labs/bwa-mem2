@@ -56,13 +56,17 @@ Two things to know:
   very fields `--compat` shapes (bwa gained a default `@HD` and the `MQ:i` tag after bwa-mem2
   forked), so matching one means *not* matching the other. Pick the target for the aligner you
   actually validate against.
-- **`--compat` can change an alignment, not only the wrapper — in one narrow case.** It is
+- **`--compat` can change an alignment, not only the wrapper — in two narrow cases.** It is
   almost entirely output-shaping (tags and header), but `--compat=bwa-mem` also reproduces bwa
   0.7.19's behavior on the "all candidate chains were weight-filtered" path, where bwa leaves the
   read **unmapped** and bwa-mem2 (and plain bwa-mem3) align it from the rejected chain. That path
   is unreachable at default settings — it needs `-W` or an `-x pacbio`/`pbref`/`ont2d` preset —
   but it is why a small fraction of alignments *can* differ between the two compat targets, and
-  between a compat target and plain, beyond tags and header.
+  between a compat target and plain, beyond tags and header. The second case is the suffix-array
+  sentinel offset ([#469](https://github.com/fg-labs/bwa-mem3/pull/469)): `--compat=bwa-mem2`
+  reproduces bwa-mem2 v2.2.1's pipelined SA lookup, which places a hit in the first few bases of
+  the concatenated reference a few bases too far left, while the default and `--compat=bwa-mem`
+  report the correct coordinate. It is latent on hg38 but reachable on small or custom references.
 
 See [`mem` → `--compat`](../cli/mem.md#--compattarget--byte-identical-output-for-another-aligner)
 for the per-target field table and

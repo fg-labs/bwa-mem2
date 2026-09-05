@@ -123,7 +123,7 @@ both targets drop them. The rest is the fork point.
 identical to `bwa-mem2` except for the `@PG` `ID`. If you are on bwa 0.7.17,
 `--compat=bwa-mem2` is the target you want.
 
-`--compat` is **output-shaping** — with one exception, it changes no alignment,
+`--compat` is **output-shaping** — with two exceptions, it changes no alignment,
 no score, no flag, and no tag's value. It exists so pipelines validating
 bwa-mem3 against a bwa-mem2 golden can diff raw output without a
 post-processing step. The equivalence is a *versioned behavioral target*, not an
@@ -132,7 +132,7 @@ value tracks a specific pinned upstream (see the bwa 0.7.19 pin above), and the
 raw diff holds for the same invocation on both binaries with `@PG` excluded, as
 the verification below shows.
 
-The exception is the last row above, and it exists because the rule and the
+The first exception is the last row above, and it exists because the rule and the
 purpose collide there. When the chain weight filter drops *every* chain for a
 read, bwa reports zero survivors and the read goes out unmapped, while
 bwa-mem2 hands back the chain it just rejected and aligns the read
@@ -227,6 +227,17 @@ Notes and caveats:
   bwa-mem3 matches at most one of them. No such record has been observed, and an
   audit of bwa 0.7.17…0.7.19 finds no change to seeding, chaining, extension,
   pairing, MAPQ or dedup — but the tail is not proven empty.
+
+**The second exception is the suffix-array sentinel offset**
+([#469](https://github.com/fg-labs/bwa-mem3/pull/469)). bwa-mem2's pipelined SA
+lookup dropped the accumulated LF-walk offset when the walk reached the sentinel
+(`$`) row, reporting any hit within the first few bases of the *concatenated*
+reference up to a few bases too far left; bwa's `bwt_sa` accounts for the walk
+and does not. The default and `--compat=bwa-mem` report the correct coordinate;
+`--compat=bwa-mem2` reproduces bwa-mem2 v2.2.1's dropped offset, because
+reproducing that release's records is its contract. It is latent on hg38 (which
+opens with a long `N` run) but reachable on small or custom references — viral,
+amplicon, bacterial, and test fixtures — where contig 0 is immediately mappable.
 
 See [Equivalence with bwa-mem2 → Byte-identical output
 (`--compat`)](../whats-different/equivalence.md#byte-identical-output---compat).

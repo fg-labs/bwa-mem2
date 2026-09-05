@@ -2664,6 +2664,12 @@ void mem_chain_seeds(FMI_search *fmi, const mem_opt_t *opt,
         return e != NULL && strcmp(e, "0") != 0;
     }();
     const int sa_across = !sa_per_read;
+    /* --compat=bwa-mem2 reproduces bwa-mem2's sentinel-row coordinate (see
+     * compat_target_t::sa_sentinel_drop_offset); every other target and the
+     * default report the correct one. NULL-tolerant like the chain filter's
+     * compat read, although mem_opt_init never leaves compat NULL. */
+    const int sa_drop_sentinel_offset =
+        (opt->compat != NULL) && opt->compat->sa_sentinel_drop_offset;
 #else
     /* The walk inside get_sa_entries_prefetch assumes the compressed-SA index
      * layout; an uncompressed build resolves via get_sa_entries below instead. */
@@ -2825,7 +2831,8 @@ void mem_chain_seeds(FMI_search *fmi, const mem_opt_t *opt,
                 }
                 uint64_t tim_sa = __rdtsc();
                 fmi->get_sa_entries_prefetch(&matchArray[smem_ptr], sa_coord, &cnt_,
-                                             chunk_end - smem_ptr, opt->max_occ, tid, id);
+                                             chunk_end - smem_ptr, opt->max_occ, tid, id,
+                                             sa_drop_sentinel_offset);
                 tprof[MEM_SA][tid] += __rdtsc() - tim_sa;
                 mypos = 0;
             }
@@ -2835,7 +2842,8 @@ void mem_chain_seeds(FMI_search *fmi, const mem_opt_t *opt,
             mypos = 0;   /* per-read path: sa_coord is rewritten for each read */
             uint64_t tim = __rdtsc();
             fmi->get_sa_entries_prefetch(&matchArray[smem_ptr], sa_coord, &cnt_,
-                                         pos - smem_ptr + 1, opt->max_occ, tid, id);  // sa compressed prefetch
+                                         pos - smem_ptr + 1, opt->max_occ, tid, id,
+                                         sa_drop_sentinel_offset);  // sa compressed prefetch
             tprof[MEM_SA][tid] += __rdtsc() - tim;
         }
         #else
