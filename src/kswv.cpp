@@ -752,7 +752,6 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
         }
     }
 
-    uint8x16_t minsc_vec = vld1q_u8(minsc);
     uint8x16_t endsc_vec = vld1q_u8(endsc);
 
     uint8x16_t e_del_vec = vdupq_n_u8(this->e_del);
@@ -796,7 +795,13 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
     }
     uint8x16_t has_endsc_vec = vld1q_u8(_has_endsc_bytes);
 
-    uint16_t exit0 = 0xFFFF;
+    /* Per-lane "finished" mask, accumulated in the epilogue: a lane is done
+     * once it has hit its KSW_XSTOP target (just_hit) or its biased score has
+     * saturated the byte range (cmp2). The batch stops when every lane is done.
+     * This replaces a scalar exit0 bitmask that cost two neon_movemask_u8
+     * reductions per row; the all-done test is one vminvq_u8. */
+    uint8x16_t done_vec = zero_vec;
+#define KSWV_U8_ALL_DONE() (vminvq_u8(done_vec) == 0xFF)
 
     tid = 0;
     uint8_t *H0 = H8_0 + tid * SIMD_WIDTH8 * this->maxQerLen;
@@ -822,8 +827,6 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
     }
 
     uint8x16_t max_vec = zero_vec, imax_vec, pimax_vec = zero_vec;
-    uint16_t mask16 = 0x0000;
-    uint16_t minsc_msk = 0x0000;
 
     uint8x16_t qe_vec = vdupq_n_u8(0);
     vst1q_u8(H0, zero_vec);
@@ -896,8 +899,8 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
     const int jdummy = USQADD ? jsplit : compute_jdummy(p, SIMD_WIDTH8, ncol, jsplit);
 
     /* Per-row epilogue, shared by the one-row and two-row sweeps. Threads the
-     * cross-row state (pimax_vec/mask16 lagged row-max store, gmax/te/qe, the
-     * frozen mask and exit0) and MUST run once per row in ascending row order,
+     * cross-row state (pimax_vec lagged row-max store, gmax/te/qe, the frozen
+     * and done masks) and MUST run once per row in ascending row order,
      * so freezing at row i suppresses row i+1 -- which is exactly what lets the
      * paired sweep call it twice back to back and stay byte-identical to the
      * one-row loop. EPI_INLINE_QE selects how the query-end column is found:
@@ -920,28 +923,19 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
         /* Block I - row max tracking (lagged one row via pimax_vec). */        \
         if (__row > 0) {                                                        \
             uint8x16_t cmp_gt = vcgtq_u8(__imax, pimax_vec);                     \
-            uint16_t msk16 = neon_movemask_u8(cmp_gt);                           \
-            msk16 |= mask16;                                                     \
             pimax_vec = vbslq_u8(cmp_gt, zero_vec, pimax_vec);                   \
             vst1q_u8(rowMax + (__row - 1) * SIMD_WIDTH8, pimax_vec);             \
-            mask16 = ~msk16;                                                     \
         }                                                                       \
         pimax_vec = __imax;                                                      \
-        /* Check minsc threshold */                                             \
-        uint8x16_t cmp_ge = vcgeq_u8(__imax, minsc_vec);                         \
-        minsc_msk = neon_movemask_u8(cmp_ge);                                    \
-        minsc_msk &= minsc_msk_a;                                                \
-        /* Block II: gmax, te */                                               \
+        /* Block II: gmax, te. (The former minsc / row-max / cmp0 scalar     \
+         * bitmasks were dead -- nothing read them -- and are gone.) */        \
         uint8x16_t cmp0 = vcgtq_u8(__imax, gmax_vec);                            \
-        uint16_t cmp0_msk = neon_movemask_u8(cmp0);                              \
-        cmp0_msk &= exit0;                                                       \
-        uint16x8_t cmp_lo_16 = vreinterpretq_u16_u8(vzip1q_u8(cmp0, cmp0));      \
-        uint16x8_t cmp_hi_16 = vreinterpretq_u16_u8(vzip2q_u8(cmp0, cmp0));      \
-        uint16x8_t frozen_lo_16 = vreinterpretq_u16_u8(vzip1q_u8(frozen_vec, frozen_vec)); \
-        uint16x8_t frozen_hi_16 = vreinterpretq_u16_u8(vzip2q_u8(frozen_vec, frozen_vec)); \
-        cmp_lo_16 = vbicq_u16(cmp_lo_16, frozen_lo_16);                          \
-        cmp_hi_16 = vbicq_u16(cmp_hi_16, frozen_hi_16);                          \
         uint8x16_t cmp0_active = vbicq_u8(cmp0, frozen_vec);                     \
+        /* te is int16 per lane: widen the ACTIVE mask by zipping it with     \
+         * itself. Zip distributes over the bic, so this equals the old        \
+         * zip-both-then-bic form in half the ops. */                          \
+        uint16x8_t cmp_lo_16 = vreinterpretq_u16_u8(vzip1q_u8(cmp0_active, cmp0_active)); \
+        uint16x8_t cmp_hi_16 = vreinterpretq_u16_u8(vzip2q_u8(cmp0_active, cmp0_active)); \
         uint8x16_t new_gmax = vmaxq_u8(gmax_vec, __imax);                        \
         gmax_vec = vbslq_u8(frozen_vec, gmax_vec, new_gmax);                     \
         te_vec_lo = vbslq_s16(cmp_lo_16, i_vec, te_vec_lo);                      \
@@ -977,14 +971,14 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
         }                                                                       \
         /* Check end score threshold */                                        \
         uint8x16_t cmp_end = vcgeq_u8(gmax_vec, endsc_vec);                      \
-        uint16_t cmp_end_msk = neon_movemask_u8(cmp_end);                        \
-        cmp_end_msk &= endsc_msk_a;                                              \
         uint8x16_t just_hit = vandq_u8(cmp_end, has_endsc_vec);                  \
         frozen_vec = vorrq_u8(frozen_vec, just_hit);                             \
+        /* Byte-range saturation check on the biased score. */                  \
         uint8x16_t left_vec = vqaddq_u8(gmax_vec, sft_vec);                      \
         uint8x16_t cmp2 = vcgeq_u8(left_vec, cmax_vec);                          \
-        uint16_t cmp2_msk = neon_movemask_u8(cmp2);                              \
-        exit0 = (~(cmp_end_msk | cmp2_msk)) & exit0;                             \
+        /* just_hit is exactly the old (cmp_end_msk & endsc_msk_a) lane set;   \
+         * accumulate both exit causes lane-wise (see done_vec). */             \
+        done_vec = vorrq_u8(done_vec, vorrq_u8(just_hit, cmp2));                 \
     }
 
     /* Two-target-row cell: rows i and i+1 at column j in one body. Row i's
@@ -1137,18 +1131,18 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
              * the inline argmax column carried by the sweep. */
             if (LazyQE) {
                 KSWV_U8_EPILOGUE(i, imax0, false, zero_vec, blockMax, H0)
-                if (exit0 == 0) { limit = i; i += 1; break; }
+                if (KSWV_U8_ALL_DONE()) { limit = i; i += 1; break; }
                 KSWV_U8_EPILOGUE(i + 1, imax1, false, zero_vec, blockMax1, H1 + SIMD_WIDTH8)
-                if (exit0 == 0) { limit = i + 1; i += 2; break; }
+                if (KSWV_U8_ALL_DONE()) { limit = i + 1; i += 2; break; }
                 /* Restore the column -1 boundary the in-place store clobbered
                  * (H0[0] held row i's column 0); after the swap this buffer is
                  * H1, then H0 again two rows on, when its [0] must read 0. */
                 vst1q_u8(H0, zero_vec);
             } else {
                 KSWV_U8_EPILOGUE(i, imax0, true, col0, blockMax, H1 + SIMD_WIDTH8)
-                if (exit0 == 0) { limit = i; i += 1; break; }
+                if (KSWV_U8_ALL_DONE()) { limit = i; i += 1; break; }
                 KSWV_U8_EPILOGUE(i + 1, imax1, true, col1, blockMax, H1 + SIMD_WIDTH8)
-                if (exit0 == 0) { limit = i + 1; i += 2; break; }
+                if (KSWV_U8_ALL_DONE()) { limit = i + 1; i += 2; break; }
             }
             (void) col0; (void) col1; (void) j_v;
 
@@ -1319,7 +1313,7 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
         /* One-row epilogue: recover qe lazily from the stored H (EPI_INLINE_QE
          * = false). Byte-identical to the pre-refactor inline body. */
         KSWV_U8_EPILOGUE(i, imax_vec, false, zero_vec, blockMax, H1 + SIMD_WIDTH8)
-        if (exit0 == 0)
+        if (KSWV_U8_ALL_DONE())
         {
             limit = i;
             i += 1;
@@ -1330,6 +1324,7 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
         i += 1;
     }
 #undef KSWV_NEON_U8_CELL_PAIR
+#undef KSWV_U8_ALL_DONE
 #undef KSWV_U8_EPILOGUE
 
     /* Store final row max. Guard on i > 0: when every pair in the batch
@@ -1655,8 +1650,8 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
      * Structural port of kswv_neon_u8: real rowMax writes each row,
      * per-lane freeze once a lane hits its KSW_XSTOP target (gated by
      * has_endsc_vec so lanes without a target aren't frozen prematurely),
-     * per-row frozen_bits collapsed from frozen_vec for the batched early
-     * exit, and a scalar b[]-emulation score2 scan over rowMax matching
+     * a per-row all-target-lanes-frozen test for the batched early exit, and
+     * a scalar b[]-emulation score2 scan over rowMax matching
      * scalar ksw_i16 exactly. It also carries the u8 kernel's sweep
      * structure: the boundary (padding) test is hoisted per row and elided
      * outright below minLen1 / jsplit, the query-end column is recovered
@@ -1753,7 +1748,10 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
     for (int i = 0; i < SIMD_WIDTH16; i++)
         _has_endsc_arr[i] = (endsc_msk_a & (1 << i)) ? (int16_t)0xFFFF : (int16_t)0x0000;
     int16x8_t has_endsc_vec = vld1q_s16(_has_endsc_arr);
-    uint8_t frozen_bits = 0;
+    /* Lanes with NO KSW_XSTOP target count as already frozen for the batched
+     * early-exit test, so "all target lanes frozen" is one vminvq_u16 over
+     * frozen | ~has_endsc (see KSWV_16_ALL_FROZEN). */
+    const uint16x8_t no_endsc_u16 = vmvnq_u16(vreinterpretq_u16_s16(has_endsc_vec));
 
     tid = 0;
     int16_t *H0     = H16_0    + tid * SIMD_WIDTH16 * this->maxQerLen;
@@ -1827,7 +1825,7 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
     /* Per-row epilogue, shared by the one-row and two-row sweeps -- the
      * int16 twin of KSWV_U8_EPILOGUE. Threads the cross-row state (lagged
      * rowMax store via pimax_vec, gmax/te/qe with the per-lane freeze mask,
-     * frozen_bits for the batched early exit) and MUST run once per row in
+     * frozen_vec for the batched early exit) and MUST run once per row in
      * ascending row order. EPI_INLINE_QE selects the query-end source: the
      * lazy rescan of EPI_HBASE (column j2 at index j2) restricted to the
      * QE_BLK block(s) EPI_BLOCKMAX says can hold the row max, or a column
@@ -1888,15 +1886,16 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
         uint16x8_t cmp_end  = vcgeq_s16(gmax_vec, endsc_vec);                   \
         uint16x8_t just_hit = vandq_u16(cmp_end, vreinterpretq_u16_s16(has_endsc_vec)); \
         frozen_vec = vorrq_s16(frozen_vec, vreinterpretq_s16_u16(just_hit));    \
-        /* Collapse frozen_vec (lanes are 0x0000 or 0xFFFF) to an 8-bit mask: \
-         * bit l set iff lane l has hit its KSW_XSTOP target. */              \
-        frozen_bits = (uint8_t)_mm_movemask_epi16(vreinterpretq_m128i_s16(frozen_vec)); \
     }
     /* Early exit only when every lane that *could* freeze has frozen -- i.e.
-     * all KSW_XSTOP-carrying lanes are done. Non-XSTOP lanes (endsc_msk_a bit
-     * clear) never contribute to frozen_bits, so the batched break matches
-     * scalar ksw_i16 (no batched global exit). */
-#define KSWV_16_ALL_FROZEN() (endsc_msk_a != 0 && (frozen_bits & endsc_msk_a) == endsc_msk_a)
+     * all KSW_XSTOP-carrying lanes are done. Lanes without a target are
+     * OR-ed in as frozen (no_endsc_u16) so they never hold the batch back,
+     * and the endsc_msk_a != 0 guard keeps a batch with no targets at all
+     * running to completion -- matching scalar ksw_i16 (no batched global
+     * exit). One vminvq_u16 in place of the former per-row movemask. */
+#define KSWV_16_ALL_FROZEN()                                                    \
+    (endsc_msk_a != 0 &&                                                        \
+     vminvq_u16(vorrq_u16(vreinterpretq_u16_s16(frozen_vec), no_endsc_u16)) == 0xFFFF)
 
     /* One DP cell of the one-row sweep. APPLY_BND / BND as in the u8 kernel. */
 #define KSWV_NEON_16_CELL(APPLY_BND, BND)                                       \
