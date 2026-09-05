@@ -466,8 +466,20 @@ void BandedPairWiseSW::scalarBandedSWAWrapper(SeqPair *seqPairArray,
         __m256i insdel = _mm256_blendv_epi16(e_ins256, e_del256, cmp);  \
         __m256i sub_a256 = _mm256_sub_epi16(tmpi, tmpj);                    \
         __m256i sub_b256 = _mm256_sub_epi16(tmpj, tmpi);                    \
-        tmp = _mm256_blendv_epi16(sub_b256, sub_a256, cmp);             \
-        tmp = _mm256_sub_epi16(score256, tmp);                          \
+        __m256i drift256 = _mm256_blendv_epi16(sub_b256, sub_a256, cmp); \
+        /* Weight the z-drop drift by the gap-extend penalty, matching the      \
+         * scalar and the 8-bit kernels: (max-m) - |drift| * e_{del|ins},       \
+         * formed in wide int32 (unpack -> _mm256_mullo_epi32) and narrowed    \
+         * with a SATURATING _mm256_packs_epi32 so |drift|*e cannot wrap int16. \
+         * unpack/pack share the per-128-lane interleave, so lane order is      \
+         * preserved. Identical to the old |drift| term at the default -E 1. */ \
+        __m256i dsgn = _mm256_srai_epi16(drift256, 15);                 \
+        __m256i esgn = _mm256_srai_epi16(insdel, 15);                   \
+        __m256i dif_lo = _mm256_mullo_epi32(_mm256_unpacklo_epi16(drift256, dsgn), \
+                                            _mm256_unpacklo_epi16(insdel, esgn)); \
+        __m256i dif_hi = _mm256_mullo_epi32(_mm256_unpackhi_epi16(drift256, dsgn), \
+                                            _mm256_unpackhi_epi16(insdel, esgn)); \
+        tmp = _mm256_sub_epi16(score256, _mm256_packs_epi32(dif_lo, dif_hi)); \
         cmp = _mm256_cmpgt_epi16(tmp, zdrop256);                            \
         if (zdrop > 0) exit0 = _mm256_andnot_si256(cmp, exit0);               \
     }
@@ -2390,8 +2402,20 @@ void BandedPairWiseSW::smithWaterman256_16(uint16_t seq1SoA[],
         __m512i insdel = _mm512_mask_blend_epi16(cmp, e_ins512, e_del512); \
         __m512i sub_a512 = _mm512_sub_epi16(tmpi, tmpj);                    \
         __m512i sub_b512 = _mm512_sub_epi16(tmpj, tmpi);                    \
-        __m512i tmp1 = _mm512_mask_blend_epi16(cmp, sub_b512, sub_a512);            \
-        tmp1 = _mm512_sub_epi16(score512, tmp1);                            \
+        __m512i drift512 = _mm512_mask_blend_epi16(cmp, sub_b512, sub_a512); \
+        /* Weight the z-drop drift by the gap-extend penalty, matching the      \
+         * scalar and the 8-bit kernels: (max-m) - |drift| * e_{del|ins},       \
+         * formed in wide int32 (unpack -> _mm512_mullo_epi32) and narrowed    \
+         * with a SATURATING _mm512_packs_epi32 so |drift|*e cannot wrap int16. \
+         * unpack/pack share the per-128-lane interleave, so lane order is      \
+         * preserved. Identical to the old |drift| term at the default -E 1. */ \
+        __m512i dsgn = _mm512_srai_epi16(drift512, 15);                 \
+        __m512i esgn = _mm512_srai_epi16(insdel, 15);                   \
+        __m512i dif_lo = _mm512_mullo_epi32(_mm512_unpacklo_epi16(drift512, dsgn), \
+                                            _mm512_unpacklo_epi16(insdel, esgn)); \
+        __m512i dif_hi = _mm512_mullo_epi32(_mm512_unpackhi_epi16(drift512, dsgn), \
+                                            _mm512_unpackhi_epi16(insdel, esgn)); \
+        __m512i tmp1 = _mm512_sub_epi16(score512, _mm512_packs_epi32(dif_lo, dif_hi)); \
         cmp = _mm512_cmpgt_epi16_mask(tmp1, zdrop512);                  \
         if (zdrop > 0) exit0 = _mm512_mask_blend_epi16(cmp, exit0, zero512);           \
     }
@@ -4361,8 +4385,24 @@ static inline int hmin_epi8(__m128i v)
         __m128i insdel = _mm_blendv_epi16(e_ins128, e_del128, cmp);     \
         __m128i sub_a128 = _mm_sub_epi16(tmpi, tmpj);                   \
         __m128i sub_b128 = _mm_sub_epi16(tmpj, tmpi);                   \
-        tmp = _mm_blendv_epi16(sub_b128, sub_a128, cmp);                \
-        tmp = _mm_sub_epi16(score128, tmp);                             \
+        __m128i drift128 = _mm_blendv_epi16(sub_b128, sub_a128, cmp);   \
+        /* Weight the z-drop drift by the gap-extend penalty, matching      \
+         * scalarBandedSWA and the 8-bit kernels: (max-m) - |drift| *       \
+         * e_{del|ins}. The product is formed in wide int32 (sign-extend    \
+         * via unpack, _mm_mullo_epi32) and narrowed with a SATURATING      \
+         * _mm_packs_epi32, so |drift|*e can never wrap int16 -- on         \
+         * overflow the true drop is deeply negative and the z-drop cannot  \
+         * fire, which the INT16 saturation reproduces exactly. The per-    \
+         * lane unpack/pack interleave cancels, so lane order is preserved. \
+         * At the default -E 1 (e==1) this equals the old |drift| term, so  \
+         * it is byte-identical there. */                                   \
+        __m128i dsgn = _mm_srai_epi16(drift128, 15);                    \
+        __m128i esgn = _mm_srai_epi16(insdel, 15);                      \
+        __m128i dif_lo = _mm_mullo_epi32(_mm_unpacklo_epi16(drift128, dsgn), \
+                                         _mm_unpacklo_epi16(insdel, esgn)); \
+        __m128i dif_hi = _mm_mullo_epi32(_mm_unpackhi_epi16(drift128, dsgn), \
+                                         _mm_unpackhi_epi16(insdel, esgn)); \
+        tmp = _mm_sub_epi16(score128, _mm_packs_epi32(dif_lo, dif_hi)); \
         cmp = _mm_cmpgt_epi16(tmp, zdrop128);                           \
         if (zdrop > 0) exit0 = _mm_blendv_epi16(exit0, zero128, cmp);                  \
     }
