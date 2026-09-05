@@ -76,6 +76,14 @@ extern uint64_t prof[10][112];
 // for 8-bit
 #define DUMMY8 8
 #define DUMMY5 5
+/* NEON-only query-tail pad code for the 8-bit kernels, in place of DUMMY5. Any
+ * value with bit 7 clear that no real base, ambiguity code (AMBQ = 8), or freed-
+ * cell sentinel (FREED_INACTIVE8) can take, and that XORs every reference code
+ * (0-3, AMBR = 4) to an index >= 16: vqtbl1q_u8 returns 0 for such indices, so
+ * the USQADD kernel body scores the pad as a zero delta straight out of the score
+ * gather, with no compare and no blend. The AVX2/AVX-512 wrappers keep DUMMY5
+ * because pshufb masks its index to four bits (16 would read entry 0). */
+#define NEON_QPAD8 16
 #define AMBRQ 0xFF
 #define AMBR 4
 #define AMBQ 8
@@ -83,8 +91,9 @@ extern uint64_t prof[10][112];
 /* Query-padding contract, shared by the batch wrappers and the kernels.
  *
  * A lane's query occupies columns [0, len2); the wrapper pads [len2, quantum)
- * with the ambiguous-query code (DUMMY5 in the 8-bit kernels, DUMMY3 in the
- * 16-bit ones) and every column from the lane's quantum out to the group's
+ * with the ambiguous-query code (DUMMY5 in the x86 8-bit kernels, NEON_QPAD8 in
+ * the NEON 8-bit kernel, DUMMY3 in the 16-bit ones) and every column from the
+ * lane's quantum out to the group's
  * widest quantum with the high-bit sentinel (0xFF / 0xFFFF). The
  * kernels must therefore zero the DP diagonal term on any cell whose query
  * byte has bit 7 set, and can derive the FIRST such column for a whole group
@@ -97,7 +106,8 @@ static inline int query_quantum8(int len2)  { return ((len2 + 16 - 1) / 16) * 16
 static inline int query_quantum16(int len2) { return ((len2 + 8 - 1) / 8) * 8; }
 
 /* Why the two query pads differ, since only one of them is inert:
- *   [len2, quantum)      DUMMY5 -> sbt = shift, i.e. m11 = h00. This
+ *   [len2, quantum)      DUMMY5 / NEON_QPAD8 -> sbt = shift (0 in the USQADD
+ *                        form), i.e. m11 = h00. This
  *                        reproduces ksw_qinit's profile-0 padding out to
  *                        slen*p (ksw.cpp:103) -- scalar ksw computes these
  *                        columns and scans them when picking qe (ksw.cpp:221),
@@ -113,11 +123,14 @@ static inline int query_quantum16(int len2) { return ((len2 + 8 - 1) / 8) * 8; }
  * A lane's own inert region therefore starts at query_quantum, and a whole
  * group's starts at the min over its lanes. */
 
-/* First column of a group at which ANY lane can hold the DUMMY5 query pad:
+/* First column of a group at which ANY lane can hold the query pad byte
+ * (DUMMY5 in the x86 8-bit kernels, NEON_QPAD8 in the NEON 8-bit kernel):
  *
  *     min{ len2 : query_quantum8(len2) > len2 }   over the group's lanes
  *
- * A lane writes DUMMY5 only on [len2, quantum), so a lane whose len2 is already
+ * The pad value differs by tier but the column it first appears at does not, so
+ * this derivation is tier-shared. A lane writes that pad only on [len2, quantum),
+ * so a lane whose len2 is already
  * a multiple of 16 contributes no such column at all and is skipped. Below the
  * minimum, the per-cell "is this the query's DUMMY5 tail padding?" test cannot
  * fire on any lane, so the 8-bit kernels elide it there. This is not a claim
@@ -148,7 +161,7 @@ static inline int compute_jdummy(const SeqPair *p, int width, int ncol, int cap)
 /* "No freed cell active on this lane" markers for the freed-cell (--meth)
  * blend, one per kernel width. Each must be a value a query byte can never
  * take, so the blend provably never fires on a lane with no active freed cell:
- *   8-bit   s2 holds 0-3, DUMMY5(5), AMBQ(8), or the 0xFF pad  -> 0xFE
+ *   8-bit   s2 holds 0-3, DUMMY5(5) or NEON_QPAD8(16), AMBQ(8), or the 0xFF pad -> 0xFE
  *   16-bit  s2 holds 0-3, AMBQ16(16), DUMMY3(26), or the 0xFFFF pad -> 0x7FFF
  * Both deliberately avoid the pad value itself. Aliasing it would make the
  * blend fire on every padded column, leaving correctness dependent on the
@@ -534,7 +547,7 @@ void kswv::kswvBatchWrapper8(SeqPair *pairArray,
 
                 for (k = sp.len2; k < quanta; k++)
                 {
-                    mySeq2SoA[k * SIMD_WIDTH8 + j] = DUMMY5;
+                    mySeq2SoA[k * SIMD_WIDTH8 + j] = NEON_QPAD8;
                 }
                 if (maxLen2 < quanta) maxLen2 = quanta;
             }
@@ -759,7 +772,10 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
     uint8x16_t oe_del_vec = vdupq_n_u8(this->o_del + this->e_del);
     uint8x16_t e_ins_vec = vdupq_n_u8(this->e_ins);
     uint8x16_t oe_ins_vec = vdupq_n_u8(this->o_ins + this->e_ins);
-    uint8x16_t five_vec = vdupq_n_u8(DUMMY5);
+    /* Query-tail pad code (NEON_QPAD8); only the biased (!USQADD) body compares
+     * against it -- see the jdummy note below. */
+    uint8x16_t qpad_vec = vdupq_n_u8(NEON_QPAD8);
+    (void) qpad_vec;
     /* Per-cell increment for the two-row sweep's carried argmax column counter. */
     const uint8x16_t one_vec = vdupq_n_u8(1);
     /* Padding sentinel test: bit 7 set marks a reference row past len1 or a
@@ -875,17 +891,22 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
         if (quanta < jsplit) jsplit = quanta;
     }
 
-    /* Same unswitch one alphabet symbol over. Every cell pays a vceqq+vbslq to
-     * ask "is this column the query's DUMMY5 tail padding?", and per the fill
-     * contract above that is a provable no-op below compute_jdummy's column --
-     * nothing else in the alphabet is 5 (real bases are 0-3, ambiguous is
-     * AMBQ=8, the tail is 0xFF). See compute_jdummy for the derivation and for
-     * why the result is clamped to jsplit.
+    /* Query-tail padding, [len2, quantum) per lane. The NEON wrapper fills it
+     * with NEON_QPAD8 (16), chosen so that the score gather handles it for free
+     * in the USQADD body: s1 is 0-3, AMBR (4), or the 0xFF reference pad, so
+     * s1 ^ 16 is 16..20 (or 0xEF), and vqtbl1q_u8 returns 0 for any index >= 16
+     * -- exactly the zero delta the pad must contribute (m11 = h00, ksw's
+     * profile-0 semantics). No compare, no blend, and no column split: jdummy is
+     * pinned to jsplit so the [jdummy, jsplit) loops are empty.
      *
-     * Production pays this on 150 bp queries padded to 160, so 150 of every 160
-     * columns take the cheap body. Ragged phase-1 groups (len2 = qe + 1 per
-     * pair) push jdummy down and get correspondingly less. */
-    const int jdummy = compute_jdummy(p, SIMD_WIDTH8, ncol, jsplit);
+     * The biased (!USQADD) body needs the pad to score `shift`, not 0, and a
+     * 16-entry table cannot say that for an index >= 16, so it keeps the
+     * per-cell vceqq(s2, qpad_vec) + vbslq(.., sft_vec) on [jdummy, jsplit),
+     * elided below compute_jdummy's column exactly as before (no lane can hold
+     * the pad there; see compute_jdummy). Production pays that only on the
+     * legacy toggle path. The AVX2/AVX-512 kernels keep DUMMY5 = 5: pshufb masks
+     * its index to four bits, so an index of 16 would read entry 0 there. */
+    const int jdummy = USQADD ? jsplit : compute_jdummy(p, SIMD_WIDTH8, ncol, jsplit);
 
     /* Per-row epilogue, shared by the one-row and two-row sweeps. Threads the
      * cross-row state (pimax_vec/mask16 lagged row-max store, gmax/te/qe, the
@@ -998,11 +1019,11 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
             uint8x16_t f11 = vld1q_u8(F + (j + 1) * SIMD_WIDTH8);                \
             uint8x16_t h00 = vld1q_u8(H0 + j * SIMD_WIDTH8);                     \
             uint8x16_t cmpq;                                                     \
-            if (NEED_DUMMY) cmpq = vceqq_u8(s2, five_vec);                       \
+            if (NEED_DUMMY && !USQADD) cmpq = vceqq_u8(s2, qpad_vec);            \
             /* ---- Row i (diagonal H0[j]) ---- */                              \
             uint8x16_t sbt0 = vqtbl1q_u8(permSft, veorq_u8(s1_0, s2));           \
-            if (NEED_DUMMY)                                                      \
-                sbt0 = vbslq_u8(cmpq, USQADD ? zero_vec : sft_vec, sbt0);        \
+            if (NEED_DUMMY && !USQADD)                                           \
+                sbt0 = vbslq_u8(cmpq, sft_vec, sbt0);                            \
             if (HasFreed)                                                        \
                 sbt0 = vbslq_u8(vceqq_u8(s2, active_frread_0), freedval_vec, sbt0); \
             uint8x16_t m11_0;                                                    \
@@ -1028,8 +1049,8 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
                                         vqsubq_u8(f11, e_del_vec));              \
             /* ---- Row i+1 (diagonal d1 = row i's prev-col H; vcarry f21_0) --- */ \
             uint8x16_t sbt1 = vqtbl1q_u8(permSft, veorq_u8(s1_1, s2));           \
-            if (NEED_DUMMY)                                                      \
-                sbt1 = vbslq_u8(cmpq, USQADD ? zero_vec : sft_vec, sbt1);        \
+            if (NEED_DUMMY && !USQADD)                                           \
+                sbt1 = vbslq_u8(cmpq, sft_vec, sbt1);                            \
             if (HasFreed)                                                        \
                 sbt1 = vbslq_u8(vceqq_u8(s2, active_frread_1), freedval_vec, sbt1); \
             uint8x16_t m11_1;                                                    \
@@ -1175,7 +1196,7 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
          * against fr_read2, and any other lane gets FREED_INACTIVE8. The two
          * ref-side comparisons are mutually exclusive (s1 can't equal both fr_ref
          * and fr_ref2), so at most one wins per lane. s2 holds real bases 0-3, the
-         * ambig/pad codes DUMMY5(5)/AMBQ(8), or the 0xFF query pad — never
+         * ambig/pad codes NEON_QPAD8(16)/AMBQ(8), or the 0xFF query pad — never
          * FREED_INACTIVE8 — so on a sentinel lane the single per-cell compare is
          * unconditionally false. This
          * turns the per-cell freed path into one vceqq + one vbslq (down from two
@@ -1213,18 +1234,20 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
             uint8x16_t xor_val = veorq_u8(s1, s2);                              \
             uint8x16_t sbt = vqtbl1q_u8(permSft, xor_val);                      \
                                                                                 \
-            /* Check for ambiguous query base (DUMMY5). Elided below jdummy,   \
-             * where no lane can hold one -- see the derivation above. */       \
-            if (NEED_DUMMY) {                                                   \
-                uint8x16_t cmpq = vceqq_u8(s2, five_vec);                       \
-                sbt = vbslq_u8(cmpq, USQADD ? zero_vec : sft_vec, sbt);         \
+            /* Query-tail pad (NEON_QPAD8). In the USQADD body the gather      \
+             * above already returned 0 for it (index >= 16); the biased body   \
+             * must force `shift` and compares, elided below jdummy where no    \
+             * lane can hold the pad -- see the jdummy note above. */           \
+            if (NEED_DUMMY && !USQADD) {                                        \
+                uint8x16_t cmpq = vceqq_u8(s2, qpad_vec);                       \
+                sbt = vbslq_u8(cmpq, sft_vec, sbt);                             \
             }                                                                   \
                                                                                 \
             /* Apply the freed-cell override: force the biased freed score      \
              * (fr_val + shift) where this column's read base equals the row's  \
              * active freed base (built once per row in active_frread above).   \
              * One compare + one blend; FREED_INACTIVE8 lanes never match any  \
-             * s2 value (0-3/5/8 or the 0xFF pad), so they blend through        \
+             * s2 value (0-3/8/16 or the 0xFF pad), so they blend through       \
              * unchanged. */                                                    \
             if (HasFreed) {                                                     \
                 sbt = vbslq_u8(vceqq_u8(s2, active_frread), freedval_vec, sbt); \
