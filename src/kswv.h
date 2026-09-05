@@ -325,8 +325,10 @@ private:
 
 	/* Templated u8 kernel body. When HasFreed, applies the freed-cell
 	 * (fr_ref x fr_read -> fr_val) override per cell; otherwise the override
-	 * blocks compile out entirely. */
-	template<bool HasFreed, bool USQADD, bool RowPair>
+	 * blocks compile out entirely. LazyQE selects, for the two-row sweep only,
+	 * post-row query-end recovery from the stored H (true) over the per-cell
+	 * argmax blend (false); it is meaningless when RowPair is false. */
+	template<bool HasFreed, bool USQADD, bool RowPair, bool LazyQE>
 	int kswv_neon_u8_impl(uint8_t seq1SoA[],
 					      uint8_t seq2SoA[],
 					      int16_t nrow,

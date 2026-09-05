@@ -331,4 +331,87 @@ TEST_CASE("kswv u8 rescue: BWA3_RESCUE_ROWPAIR off == on, and one-row matches sc
 #endif
 }
 
+// The two-row sweep recovers the query-end column either inline (a per-cell
+// strict-greater blend of a carried column counter) or lazily (row i's H written
+// back into the dead diagonal slot H0[j], both rows' running maxima checkpointed
+// per QE_BLK, and the shared KSWV_U8_EPILOGUE rescan run for both rows).
+// rescue_lazyqe_enabled() reads BWA3_RESCUE_LAZYQE on every call, so this drives
+// one batch through the paired kernel with the lazy path off then on. Both arms
+// run the same recurrence, so the A/B is strict all-field; the inline arm is
+// additionally checked against the scalar oracle so a shared-epilogue bug cannot
+// hide by shifting both arms together. Pairing is forced ON for both arms
+// (BWA3_RESCUE_ROWPAIR=1) so the lazy toggle is the only difference.
+TEST_CASE("kswv u8 rescue: BWA3_RESCUE_LAZYQE off == on in the two-row sweep, and inline matches scalar"
+          * doctest::test_suite("unit/kswv")) {
+
+#if !defined(__ARM_NEON) && !defined(__aarch64__)
+    MESSAGE("skipped: BWA3_RESCUE_LAZYQE affects the NEON u8 rescue kernel only");
+    return;
+#else
+    auto mat = bwa_tests::build_scoring_matrix(1, 4, 1);
+
+    std::mt19937 rng(4321);
+    auto pairs = build_edge_cases(rng);
+    auto bulk  = build_bulk_random(rng, 300);
+    pairs.insert(pairs.end(), bulk.begin(), bulk.end());
+
+    std::vector<kswr_t> scalar_aln;
+    scalar_aln.reserve(pairs.size());
+    for (const auto &p : pairs) scalar_aln.push_back(bwa_tests::run_scalar_ksw(p, mat));
+
+    // Save/restore both env vars so doctest run order cannot leak an override
+    // into a sibling case that assumes the defaults (pairing on, lazy on).
+    const char *saved_rp = getenv("BWA3_RESCUE_ROWPAIR");
+    const std::string saved_rp_val = saved_rp ? saved_rp : "";
+    const bool had_rp = saved_rp != nullptr;
+    const char *saved_lq = getenv("BWA3_RESCUE_LAZYQE");
+    const std::string saved_lq_val = saved_lq ? saved_lq : "";
+    const bool had_lq = saved_lq != nullptr;
+
+    setenv("BWA3_RESCUE_ROWPAIR", "1", 1);
+    setenv("BWA3_RESCUE_LAZYQE", "0", 1);
+    auto inline_qe = bwa_tests::run_kswv_batch(pairs, mat);
+    setenv("BWA3_RESCUE_LAZYQE", "1", 1);
+    auto lazy_qe = bwa_tests::run_kswv_batch(pairs, mat);
+
+    if (had_rp) setenv("BWA3_RESCUE_ROWPAIR", saved_rp_val.c_str(), 1);
+    else        unsetenv("BWA3_RESCUE_ROWPAIR");
+    if (had_lq) setenv("BWA3_RESCUE_LAZYQE", saved_lq_val.c_str(), 1);
+    else        unsetenv("BWA3_RESCUE_LAZYQE");
+
+    REQUIRE(inline_qe.size() == pairs.size());
+    REQUIRE(lazy_qe.size() == pairs.size());
+
+    int drift = 0, oracle_mism = 0;
+    for (size_t i = 0; i < pairs.size(); i++) {
+        const kswr_t &a = inline_qe[i];
+        const kswr_t &b = lazy_qe[i];
+        const bool eq = a.score == b.score && a.te == b.te && a.qe == b.qe
+                     && a.score2 == b.score2 && a.te2 == b.te2
+                     && a.tb == b.tb && a.qb == b.qb;
+        if (!eq) {
+            ++drift;
+            CAPTURE(i); CAPTURE(pairs[i].tag);
+            CAPTURE(a.score); CAPTURE(b.score);
+            CAPTURE(a.te); CAPTURE(b.te); CAPTURE(a.qe); CAPTURE(b.qe);
+            CAPTURE(a.tb); CAPTURE(b.tb); CAPTURE(a.qb); CAPTURE(b.qb);
+            CHECK(eq);
+        }
+        const bool o_score  = bwa_tests::kswr_score_eq(scalar_aln[i], a);
+        const bool o_coord  = bwa_tests::kswr_coords_eq(scalar_aln[i], a);
+        const bool o_score2 = bwa_tests::kswr_score2_eq(scalar_aln[i], a);
+        if (!(o_score && o_coord && o_score2)) {
+            ++oracle_mism;
+            CAPTURE(i); CAPTURE(pairs[i].tag);
+            CAPTURE(scalar_aln[i].score); CAPTURE(a.score);
+            CHECK(o_score); CHECK(o_coord); CHECK(o_score2);
+        }
+    }
+    MESSAGE("lazyqe off-vs-on drift=" << drift << ", inline vs scalar mism="
+            << oracle_mism << " over " << pairs.size() << " pairs");
+    CHECK(drift == 0);
+    CHECK(oracle_mism == 0);
+#endif
+}
+
 #endif // BWA_TESTS_HAVE_KSWV
