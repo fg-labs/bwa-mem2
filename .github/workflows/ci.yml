@@ -839,7 +839,10 @@ jobs:
           bash test/regression/all_tiers_parity.sh
 
       - name: Run unit-test harness
-        if: matrix.canonical == true || matrix.arch_flag == 'sse41'
+        # The standalone FM-index parity tests in the harness gate the arm64
+        # vector occurrence path; on x86 rows that code is compiled out, so
+        # the harness must also run on the arm64 rows to test it.
+        if: matrix.canonical == true || matrix.arch_flag == 'sse41' || matrix.os == 'ubuntu-24.04-arm' || matrix.os == 'macos-latest'
         run: |
           bash test/run_unit_tests.sh
 
