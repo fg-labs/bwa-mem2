@@ -2319,8 +2319,17 @@ int64_t FMI_search::call_one_step(int64_t pos, int64_t &sa_entry, int64_t &offse
 }
 
 /* Lane count of the pipelined compressed-SA resolver (get_sa_entries_prefetch);
- * see the BWA3_SA_LANES note there. */
+ * see the BWA3_SA_LANES note there. 40 on x86_64, 20 elsewhere: a 20-vs-40 A/B
+ * on a 5M-pair WGS slice (3 interleaved reps, user CPU) measured -0.30% on
+ * AMD Zen3 (every rep faster) and no change on Intel Sapphire Rapids, while
+ * a 16..40 sweep on Graviton4 was flat. The count only sets how many
+ * checkpoint-block fetches are in flight; results are stored by position and
+ * are byte-identical at every width. */
+#if defined(__x86_64__) || defined(_M_X64)
+#define SA_RESOLVE_LANES_DEFAULT 40
+#else
 #define SA_RESOLVE_LANES_DEFAULT 20
+#endif
 #define SA_RESOLVE_LANES_MAX 64
 /* The resolver's lane arrays (working_set/map_pos/offset) are sized to
  * SA_RESOLVE_LANES_MAX and indexed by sa_batch_size, which is clamped into
