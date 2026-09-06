@@ -91,6 +91,11 @@ extern uint64_t prof[10][112];
 #define DUMMY1 99
 #define DUMMY2 100
 
+#if defined(__AVX2__)
+/* Tiled SoA packing for the AVX2 / AVX-512BW 8-bit batch wrappers. */
+#include "x86_soa_pack.h"
+#endif
+
 // Asymmetric ambiguous-base (N) encoding for the AVX-512 16-bit permutexvar LUT
 // prepass (SBT_PREPASS16_LUT). Ref-N and query-N map to distinct codes so that
 // every reachable ref/query XOR lands in a valid 32-entry LUT slot:
@@ -770,6 +775,8 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
             int maxLen1 = 0;
             int maxLen2 = 0;
             bsize = w;
+            const uint8_t *seq1p[SIMD_WIDTH8], *seq2p[SIMD_WIDTH8];
+            int len1a[SIMD_WIDTH8], len2a[SIMD_WIDTH8];
 
             uint64_t tim;
             for(j = 0; j < SIMD_WIDTH8; j++)
@@ -804,22 +811,15 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
                 if (sp.len2 < 0 || sp.len2 >= MAX_SEQ_LEN8)
                     err_fatal(__func__, "bandedSWA: query length (len2) %d for pair %d is out of range [0, MAX_SEQ_LEN8=%d)", sp.len2, sp.id, MAX_SEQ_LEN8);
 
-                for(k = 0; k < sp.len1; k++)
-                {
-                    mySeq1SoA[k * SIMD_WIDTH8 + j] = seq1[k] /* PR16: N stays 4 */;
-                }
+                seq1p[j] = seq1;
+                len1a[j] = sp.len1;
                 qlen_scaled[j] = sp.len2 * max;
                 if(maxLen1 < sp.len1) maxLen1 = sp.len1;
             }
-
-            for(j = 0; j < SIMD_WIDTH8; j++)
-            {
-                SeqPair sp = pairArray[i + j];
-                for(k = sp.len1; k <= maxLen1; k++) //removed "="
-                {
-                    mySeq1SoA[k * SIMD_WIDTH8 + j] = DUMMY1;
-                }
-            }
+            /* Tiled transpose in place of the strided byte scatter (see
+             * x86_soa_pack.h): bases (N stays 4), then DUMMY1 from len1 through
+             * row maxLen1 inclusive -- byte-for-byte what the scalar loops wrote. */
+            x86_soa_pack<SIMD_WIDTH8>(mySeq1SoA, seq1p, len1a, len1a, maxLen1 + 1, DUMMY1, DUMMY1, false, AMBIG, 8);
             /* B5: only the boundary row H2[maxLen1] survives the h0-prefix
              * deletion seed below (which overwrites rows [0, maxLen1)); write
              * just that row here, before the seed, instead of the dead per-row
@@ -854,21 +854,13 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
                 seq2 = seqBufQer + (int64_t)sp.idq;
                 
                 
-                for(k = 0; k < sp.len2; k++)
-                {
-                    mySeq2SoA[k * SIMD_WIDTH8 + j] = (seq2[k]==AMBIG ? 8 : seq2[k]) /* PR16: query N→8 */;
-                }
+                seq2p[j] = seq2;
+                len2a[j] = sp.len2;
                 if(maxLen2 < sp.len2) maxLen2 = sp.len2;
             }
-
-            for(j = 0; j < SIMD_WIDTH8; j++)
-            {
-                SeqPair sp = pairArray[i + j];
-                for(k = sp.len2; k <= maxLen2; k++)
-                {
-                    mySeq2SoA[k * SIMD_WIDTH8 + j] = DUMMY2;
-                }
-            }
+            /* Query side: bases with N (4) -> 8, then DUMMY2 from len2 through
+             * column maxLen2 inclusive. */
+            x86_soa_pack<SIMD_WIDTH8>(mySeq2SoA, seq2p, len2a, len2a, maxLen2 + 1, DUMMY2, DUMMY2, true, AMBIG, 8);
             /* B5: only the boundary row H1[maxLen2] (value 0) survives the
              * h0-prefix insertion seed below; write just that row, before the
              * seed so its unconditional H1[0]/H1[1] stores still win. */
@@ -2723,6 +2715,8 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
             int maxLen1 = 0;
             int maxLen2 = 0;
             bsize = w;
+            const uint8_t *seq1p[SIMD_WIDTH8], *seq2p[SIMD_WIDTH8];
+            int len1a[SIMD_WIDTH8], len2a[SIMD_WIDTH8];
 
             uint64_t tim;
             for(j = 0; j < SIMD_WIDTH8; j++)
@@ -2756,22 +2750,15 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
                 if (sp.len2 < 0 || sp.len2 >= MAX_SEQ_LEN8)
                     err_fatal(__func__, "bandedSWA: query length (len2) %d for pair %d is out of range [0, MAX_SEQ_LEN8=%d)", sp.len2, sp.id, MAX_SEQ_LEN8);
 
-                for(k = 0; k < sp.len1; k++)
-                {
-                    mySeq1SoA[k * SIMD_WIDTH8 + j] = seq1[k] /* PR16: N stays 4 */;
-                }
+                seq1p[j] = seq1;
+                len1a[j] = sp.len1;
                 qlen_scaled[j] = sp.len2 * max;
                 if(maxLen1 < sp.len1) maxLen1 = sp.len1;
             }
-
-            for(j = 0; j < SIMD_WIDTH8; j++)
-            {
-                SeqPair sp = pairArray[i + j];
-                for(k = sp.len1; k <= maxLen1; k++)
-                {
-                    mySeq1SoA[k * SIMD_WIDTH8 + j] = DUMMY1;
-                }
-            }
+            /* Tiled transpose in place of the strided byte scatter (see
+             * x86_soa_pack.h): bases (N stays 4), then DUMMY1 from len1 through
+             * row maxLen1 inclusive -- byte-for-byte what the scalar loops wrote. */
+            x86_soa_pack<SIMD_WIDTH8>(mySeq1SoA, seq1p, len1a, len1a, maxLen1 + 1, DUMMY1, DUMMY1, false, AMBIG, 8);
             /* B5: only boundary row H2[maxLen1] survives the seed below; write just that row. */
             _mm512_store_si512((__m512i *)(H2 + maxLen1 * SIMD_WIDTH8), _mm512_set1_epi8((char)DUMMY1));
 //--------------------
@@ -2796,21 +2783,13 @@ void BandedPairWiseSW::smithWatermanBatchWrapper8(SeqPair *pairArray,
                 
                 SeqPair sp = pairArray[i + j];
                 seq2 = seqBufQer + (int64_t)sp.idq;
-                for(k = 0; k < sp.len2; k++)
-                {
-                    mySeq2SoA[k * SIMD_WIDTH8 + j] = (seq2[k]==AMBIG ? 8 : seq2[k]) /* PR16: query N→8 */;
-                }
+                seq2p[j] = seq2;
+                len2a[j] = sp.len2;
                 if(maxLen2 < sp.len2) maxLen2 = sp.len2;
             }
-            
-            for(j = 0; j < SIMD_WIDTH8; j++)
-            {
-                SeqPair sp = pairArray[i + j];
-                for(k = sp.len2; k <= maxLen2; k++)
-                {
-                    mySeq2SoA[k * SIMD_WIDTH8 + j] = DUMMY2;
-                }
-            }
+            /* Query side: bases with N (4) -> 8, then DUMMY2 from len2 through
+             * column maxLen2 inclusive. */
+            x86_soa_pack<SIMD_WIDTH8>(mySeq2SoA, seq2p, len2a, len2a, maxLen2 + 1, DUMMY2, DUMMY2, true, AMBIG, 8);
             /* B5: only boundary row H1[maxLen2]=0 survives the seed below. */
             _mm512_store_si512((__m512i *)(H1 + maxLen2 * SIMD_WIDTH8), _mm512_setzero_si512());
 //------------------------

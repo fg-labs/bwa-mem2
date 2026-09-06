@@ -88,6 +88,12 @@ extern uint64_t prof[10][112];
 #define AMBR 4
 #define AMBQ 8
 
+#if defined(__AVX2__)
+/* Tiled SoA packing for the AVX2 / AVX-512BW 8-bit batch wrappers (the
+ * strided byte scatter they replaced is byte-for-byte reproduced). */
+#include "x86_soa_pack.h"
+#endif
+
 /* Query-padding contract, shared by the batch wrappers and the kernels.
  *
  * A lane's query occupies columns [0, len2); the wrapper pads [len2, quantum)
@@ -2833,35 +2839,27 @@ void kswv::kswvBatchWrapper8_avx2(SeqPair *pairArray,
     for (int32_t i = 0; i < numPairs; i += SIMD_WIDTH8) {
         int maxLen1 = 0, maxLen2 = 0;
 
+        /* Gather the group's lane geometry once, then build both SoA
+         * buffers with the tiled transpose (x86_soa_pack). Reference: bases,
+         * then 0xFF from len1 through row maxLen1 inclusive; the old
+         * (seq1[k] == AMBIG_ ? AMBR : seq1[k]) remap was the identity
+         * (AMBIG_ == AMBR == 4). Query: bases (AMBIG_ -> AMBQ), DUMMY5 on
+         * [len2, quantum), 0xFF from the quantum through column maxLen2
+         * inclusive -- byte-for-byte what the per-lane loops wrote. */
+        const uint8_t *seq1p[SIMD_WIDTH8], *seq2p[SIMD_WIDTH8];
+        int len1a[SIMD_WIDTH8], len2a[SIMD_WIDTH8], quant[SIMD_WIDTH8];
         for (int j = 0; j < SIMD_WIDTH8; j++) {
-            SeqPair sp = pairArray[i + j];
-            uint8_t *seq1 = seqBufRef + sp.idr;
-            for (int k = 0; k < sp.len1; k++)
-                mySeq1SoA[k * SIMD_WIDTH8 + j] = (seq1[k] == AMBIG_ ? AMBR : seq1[k]);
+            const SeqPair &sp = pairArray[i + j];
+            seq1p[j] = seqBufRef + sp.idr;
+            seq2p[j] = seqBufQer + sp.idq;
+            len1a[j] = sp.len1;
+            len2a[j] = sp.len2;
+            quant[j] = query_quantum8(sp.len2);
             if (maxLen1 < sp.len1) maxLen1 = sp.len1;
+            if (maxLen2 < quant[j]) maxLen2 = quant[j];
         }
-        for (int j = 0; j < SIMD_WIDTH8; j++) {
-            SeqPair sp = pairArray[i + j];
-            for (int k = sp.len1; k <= maxLen1; k++)
-                mySeq1SoA[k * SIMD_WIDTH8 + j] = 0xFF;
-        }
-
-        for (int j = 0; j < SIMD_WIDTH8; j++) {
-            SeqPair sp = pairArray[i + j];
-            uint8_t *seq2 = seqBufQer + sp.idq;
-            int quanta = query_quantum8(sp.len2);
-            for (int k = 0; k < sp.len2; k++)
-                mySeq2SoA[k * SIMD_WIDTH8 + j] = (seq2[k] == AMBIG_ ? AMBQ : seq2[k]);
-            for (int k = sp.len2; k < quanta; k++)
-                mySeq2SoA[k * SIMD_WIDTH8 + j] = DUMMY5;
-            if (maxLen2 < quanta) maxLen2 = quanta;
-        }
-        for (int j = 0; j < SIMD_WIDTH8; j++) {
-            SeqPair sp = pairArray[i + j];
-            int quanta = query_quantum8(sp.len2);
-            for (int k = quanta; k <= maxLen2; k++)
-                mySeq2SoA[k * SIMD_WIDTH8 + j] = 0xFF;
-        }
+        x86_soa_pack<SIMD_WIDTH8>(mySeq1SoA, seq1p, len1a, len1a, maxLen1 + 1, 0xFF, 0xFF, false, AMBIG_, AMBR);
+        x86_soa_pack<SIMD_WIDTH8>(mySeq2SoA, seq2p, len2a, quant, maxLen2 + 1, DUMMY5, 0xFF, true, AMBIG_, AMBQ);
 
         kswv256_u8(mySeq1SoA, mySeq2SoA,
                    (int16_t)maxLen1, (int16_t)maxLen2,
@@ -3443,59 +3441,29 @@ void kswv::kswvBatchWrapper8(SeqPair *pairArray,
             int maxLen1 = 0;
             int maxLen2 = 0;
 
+            /* Gather the group's lane geometry once, then build both SoA
+             * buffers with the tiled transpose (x86_soa_pack); see the AVX2
+             * wrapper for the fill contract this reproduces byte-for-byte. */
+            const uint8_t *seq1p[SIMD_WIDTH8], *seq2p[SIMD_WIDTH8];
+            int len1a[SIMD_WIDTH8], len2a[SIMD_WIDTH8], quant[SIMD_WIDTH8];
             for(j = 0; j < SIMD_WIDTH8; j++)
             {
-                SeqPair sp = pairArray[i + j];
-#if MAINY               
-                seq1 = seqBufRef + (int64_t)sp.id * this->maxRefLen;
-#else
-                seq1 = seqBufRef + sp.idr;
-#endif
-                for(k = 0; k < sp.len1; k++)
-                {
-                    mySeq1SoA[k * SIMD_WIDTH8 + j] = (seq1[k] == AMBIG_ ? AMBR:seq1[k]);
-                }
-                if(maxLen1 < sp.len1) maxLen1 = sp.len1;
-            }
-            for(j = 0; j < SIMD_WIDTH8; j++)
-            {
-                SeqPair sp = pairArray[i + j];
-                for(k = sp.len1; k <= maxLen1; k++) //removed "="
-                {
-                    mySeq1SoA[k * SIMD_WIDTH8 + j] = 0xFF;
-                }
-            }
-            
-            for(j = 0; j < SIMD_WIDTH8; j++)
-            {               
-                SeqPair sp = pairArray[i + j];
+                const SeqPair &sp = pairArray[i + j];
 #if MAINY
-                seq2 = seqBufQer + (int64_t)sp.id * this->maxQerLen;
+                seq1p[j] = seqBufRef + (int64_t)sp.id * this->maxRefLen;
+                seq2p[j] = seqBufQer + (int64_t)sp.id * this->maxQerLen;
 #else
-                seq2 = seqBufQer + sp.idq;
+                seq1p[j] = seqBufRef + sp.idr;
+                seq2p[j] = seqBufQer + sp.idq;
 #endif
-                // assert(sp.len2 < this->maxQerLen);
-                int quanta = query_quantum8(sp.len2);
-                for(k = 0; k < sp.len2; k++)
-                {
-                    mySeq2SoA[k * SIMD_WIDTH8 + j] = (seq2[k]==AMBIG_? AMBQ:seq2[k]);
-                }
-
-                for(k = sp.len2; k < quanta; k++) {
-                    mySeq2SoA[k * SIMD_WIDTH8 + j] = DUMMY5;  // SSE quanta
-                }
-                if(maxLen2 < (quanta)) maxLen2 = quanta;
+                len1a[j] = sp.len1;
+                len2a[j] = sp.len2;
+                quant[j] = query_quantum8(sp.len2);
+                if(maxLen1 < sp.len1) maxLen1 = sp.len1;
+                if(maxLen2 < quant[j]) maxLen2 = quant[j];
             }
-            
-            for(j = 0; j < SIMD_WIDTH8; j++)
-            {
-                SeqPair sp = pairArray[i + j];
-                int quanta = query_quantum8(sp.len2);
-                for(k = quanta; k <= maxLen2; k++)
-                {
-                    mySeq2SoA[k * SIMD_WIDTH8 + j] = 0xFF;
-                }
-            }
+            x86_soa_pack<SIMD_WIDTH8>(mySeq1SoA, seq1p, len1a, len1a, maxLen1 + 1, 0xFF, 0xFF, false, AMBIG_, AMBR);
+            x86_soa_pack<SIMD_WIDTH8>(mySeq2SoA, seq2p, len2a, quant, maxLen2 + 1, DUMMY5, 0xFF, true, AMBIG_, AMBQ);
 
             kswv512_u8(mySeq1SoA, mySeq2SoA,
                        maxLen1, maxLen2,

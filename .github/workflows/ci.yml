@@ -528,6 +528,17 @@ jobs:
           ./bseq_read_pe_oob_test
           ./bseq_read_comment_copy_test
           ./bseq_read_truncated_gzip_test
+      - name: SoA pack matches the scalar fill (x86 8-bit batch wrappers)
+        # Header-only standalone doctest binary: for randomized lane groups it
+        # builds the AVX2 (and, on an AVX-512BW host, the AVX-512BW) 8-bit SoA
+        # input with x86_soa_pack and asserts memcmp equality against the scalar
+        # per-base fill it replaced, every pad row and a canary row included.
+        # Built at -march=native, independent of arch_flag; rows without AVX2
+        # (arm64) compile it to a recorded skip.
+        run: |
+          make x86_soa_pack_test CXX=${{ matrix.cxx || 'clang++-19' }}
+          ./x86_soa_pack_test
+
       - name: kvec growth aborts on realloc failure
         # Header-only standalone binary, forked like a death test: it forces the
         # realloc behind kvec.h's growth macros to fail and asserts the child
