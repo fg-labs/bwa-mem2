@@ -113,6 +113,81 @@ static inline void neon_soa_pack16(uint8_t *soa,
     }
 }
 
+/* In-register 8x8 halfword transpose: on entry r[j] holds 8 consecutive
+ * positions of lane j; on return r[k] holds position k of every lane (the
+ * 16-bit SoA row k). Three zip stages -- halfwords, words, doublewords. */
+static inline void neon_transpose8x8_u16(uint16x8_t r[8])
+{
+    uint16x8_t a[8];
+    for (int p = 0; p < 4; p++) {                 /* lanes (2p, 2p+1): k 0-3 | 4-7 */
+        a[2 * p]     = vzip1q_u16(r[2 * p], r[2 * p + 1]);
+        a[2 * p + 1] = vzip2q_u16(r[2 * p], r[2 * p + 1]);
+    }
+    uint32x4_t b[8];
+    for (int h = 0; h < 2; h++) {                 /* lanes 4h..4h+3: k pairs (0,1) .. (6,7) */
+        const uint32x4_t lo0 = vreinterpretq_u32_u16(a[4 * h]),     lo1 = vreinterpretq_u32_u16(a[4 * h + 2]);
+        const uint32x4_t hi0 = vreinterpretq_u32_u16(a[4 * h + 1]), hi1 = vreinterpretq_u32_u16(a[4 * h + 3]);
+        b[4 * h]     = vzip1q_u32(lo0, lo1);
+        b[4 * h + 1] = vzip2q_u32(lo0, lo1);
+        b[4 * h + 2] = vzip1q_u32(hi0, hi1);
+        b[4 * h + 3] = vzip2q_u32(hi0, hi1);
+    }
+    for (int m = 0; m < 4; m++) {                 /* lanes 0-3 | 4-7 -> rows 2m, 2m+1 */
+        const uint64x2_t x = vreinterpretq_u64_u32(b[m]);
+        const uint64x2_t y = vreinterpretq_u64_u32(b[4 + m]);
+        r[2 * m]     = vreinterpretq_u16_u64(vzip1q_u64(x, y));
+        r[2 * m + 1] = vreinterpretq_u16_u64(vzip2q_u64(x, y));
+    }
+}
+
+/* 16-bit twin of neon_soa_pack16 for the 8-lane int16 SoA: 8 positions per
+ * tile, each lane's 8 bytes loaded and widened to halfwords, the ambiguity
+ * code remapped (AMBIG_ -> ambCode) on whole tile vectors (no pad code equals
+ * 4), transposed, and stored as 8 SoA rows. Lane j's row k is
+ *     seq[j][k]  (4 -> ambCode)   for k <  len[j]
+ *     padA                        for len[j] <= k < padStart[j]
+ *     padB                        for k >= padStart[j]
+ * and rows [0, nrows) are written. Byte-for-byte the scalar fill's output. */
+static inline void neon_soa_pack8_u16(int16_t *soa,
+                                      const uint8_t *const seq[SIMD_WIDTH16],
+                                      const int len[SIMD_WIDTH16],
+                                      const int padStart[SIMD_WIDTH16],
+                                      int nrows, uint16_t padA, uint16_t padB,
+                                      uint16_t ambCode)
+{
+    static_assert(SIMD_WIDTH16 == 8,
+                  "neon_soa_pack8_u16 hardcodes 8-wide tiles (t[8]/tmp[8]/kb += 8); "
+                  "SIMD_WIDTH16 must be 8 on the NEON tier");
+    const uint16x8_t four  = vdupq_n_u16(AMBIG_);
+    const uint16x8_t ambv  = vdupq_n_u16(ambCode);
+    const uint16x8_t padBv = vdupq_n_u16(padB);
+    for (int kb = 0; kb < nrows; kb += 8) {
+        uint16x8_t t[8];
+        for (int j = 0; j < SIMD_WIDTH16; j++) {
+            uint16x8_t v;
+            if (kb + 8 <= len[j]) {
+                v = vmovl_u8(vld1_u8(seq[j] + kb));
+                v = vbslq_u16(vceqq_u16(v, four), ambv, v);
+            } else if (kb >= padStart[j]) {
+                v = padBv;
+            } else {
+                uint16_t tmp[8];
+                for (int t2 = 0; t2 < 8; t2++) {
+                    const int k = kb + t2;
+                    tmp[t2] = k < len[j] ? (seq[j][k] == AMBIG_ ? ambCode : (uint16_t) seq[j][k])
+                            : (k < padStart[j] ? padA : padB);
+                }
+                v = vld1q_u16(tmp);
+            }
+            t[j] = v;
+        }
+        neon_transpose8x8_u16(t);
+        const int kend = (kb + 8 < nrows) ? kb + 8 : nrows;
+        for (int k = kb; k < kend; k++)
+            vst1q_s16(soa + (size_t) k * SIMD_WIDTH16, vreinterpretq_s16_u16(t[k - kb]));
+    }
+}
+
 #endif  /* __ARM_NEON || __aarch64__ */
 
 #endif  /* BWAMEM3_NEON_SOA_PACK_H */
