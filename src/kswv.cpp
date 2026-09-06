@@ -983,7 +983,7 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
 
     /* Two-target-row cell: rows i and i+1 at column j in one body. Row i's
      * diagonal is H0[j] (= H(i-1,j-1)); row i+1's diagonal is row i's H at the
-     * PREVIOUS column, carried in d1, and its vertical carry is row i's f21_0,
+     * PREVIOUS column, passed in via DIN, and its vertical carry is row i's f21_0,
      * handed over in a register. Only row i+1's H and F reach memory (row i's are
      * consumed entirely by row i+1), so the pair costs five memory ops for two
      * cells. Arithmetic is cell-for-cell identical to KSWV_NEON_U8_CELL. The
@@ -993,8 +993,8 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
      * QE_BLK for a post-row rescan; or inline, tracking the argmax column per
      * row (j_v, strict-greater blend). BND0/BND1 are the per-row boundary masks;
      * APPLY_BND/NEED_DUMMY fold at compile time like the one-row macro.
-     * Persistent per-sweep regs: imax0/1, e11_0/1, d1 (+ col0/1, j_v inline). */
-#define KSWV_NEON_U8_CELL_PAIR(APPLY_BND, BND0, BND1, NEED_DUMMY)                \
+     * Persistent per-sweep regs: imax0/1, e11_0/1, d1/d1b (+ col0/1, j_v inline). */
+#define KSWV_NEON_U8_CELL_PAIR(APPLY_BND, BND0, BND1, NEED_DUMMY, DIN, DOUT)     \
         {                                                                       \
             uint8x16_t s2 = vld1q_u8(seq2SoA + j * SIMD_WIDTH8);                 \
             uint8x16_t f11 = vld1q_u8(F + (j + 1) * SIMD_WIDTH8);                \
@@ -1028,7 +1028,7 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
                              vqsubq_u8(e11_0, e_ins_vec));                       \
             uint8x16_t f21_0 = vmaxq_u8(vqsubq_u8(hme0, oe_del_vec),             \
                                         vqsubq_u8(f11, e_del_vec));              \
-            /* ---- Row i+1 (diagonal d1 = row i's prev-col H; vcarry f21_0) --- */ \
+            /* ---- Row i+1 (diagonal DIN = row i's prev-col H; vcarry f21_0) -- */ \
             uint8x16_t sbt1 = vqtbl1q_u8(permSft, veorq_u8(s1_1, s2));           \
             if (NEED_DUMMY && !USQADD)                                           \
                 sbt1 = vbslq_u8(cmpq, sft_vec, sbt1);                            \
@@ -1036,10 +1036,10 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
                 sbt1 = vbslq_u8(vceqq_u8(s2, active_frread_1), freedval_vec, sbt1); \
             uint8x16_t m11_1;                                                    \
             if (USQADD) {                                                        \
-                m11_1 = NEON_SQADD_U8(d1, sbt1);                                 \
+                m11_1 = NEON_SQADD_U8((DIN), sbt1);                              \
                 if (APPLY_BND) m11_1 = vbslq_u8((BND1), zero_vec, m11_1);        \
             } else {                                                            \
-                m11_1 = vqaddq_u8(d1, sbt1);                                     \
+                m11_1 = vqaddq_u8((DIN), sbt1);                                  \
                 if (APPLY_BND) m11_1 = vbslq_u8((BND1), zero_vec, m11_1);        \
                 m11_1 = vqsubq_u8(m11_1, sft_vec);                              \
             }                                                                   \
@@ -1054,7 +1054,7 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
                                         vqsubq_u8(f21_0, e_del_vec));            \
             vst1q_u8(H1 + (j + 1) * SIMD_WIDTH8, h11_1);                         \
             vst1q_u8(F + (j + 1) * SIMD_WIDTH8, f21_1);                          \
-            d1 = h11_0;                                                          \
+            (DOUT) = h11_0;                                                      \
             if (!LazyQE) j_v = vaddq_u8(j_v, one_vec);                           \
         }
 
@@ -1074,6 +1074,45 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
             for (; j < jend_; j++) BODY                                         \
             if ((j % QE_BLK) == 0) { CKPT }                                     \
         }
+    /* Two-column unrolled twin of KSWV_U8_BLOCKS for the two-row body. The
+     * row-i diagonal hand-off alternates between d1 and d1b, so the loop-
+     * carried value never needs a register copy (with a single carried d1 the
+     * compiler emitted one `mov` per column to rotate it). An odd tail column
+     * -- only a partial block or the biased body's jdummy can produce one --
+     * runs once and copies d1b back so d1 holds the latest value when the
+     * next range starts.
+     *
+     * Gated on __APPLE__ (Apple silicon): +1 to +3.5% on the isolated kernel
+     * there, but -0.3 to -0.6% on Neoverse V2, where the scalar address
+     * arithmetic the unroll trades for the `mov` costs more. We test __APPLE__,
+     * not APPLE_SILICON: simd_compat.h defines APPLE_SILICON on every aarch64
+     * target (it is the codebase-wide NEON synonym), so gating on it would pull
+     * the unroll onto Graviton too; __APPLE__ is Apple-only. Non-Apple builds
+     * alias this to the rolled loop with d1 as both diagonal registers, i.e.
+     * the original code. */
+#if defined(__APPLE__)
+#define KSWV_U8_BLOCKS2(hi, CKPT, APPLY_BND, BND0, BND1, NEED_DUMMY)            \
+        for (; j < (hi); ) {                                                    \
+            const int jnb_ = ((j / QE_BLK) + 1) * QE_BLK;                       \
+            const int jend_ = jnb_ < (hi) ? jnb_ : (hi);                        \
+            for (; j + 1 < jend_; ) {                                           \
+                KSWV_NEON_U8_CELL_PAIR(APPLY_BND, BND0, BND1, NEED_DUMMY, d1, d1b) \
+                j++;                                                            \
+                KSWV_NEON_U8_CELL_PAIR(APPLY_BND, BND0, BND1, NEED_DUMMY, d1b, d1) \
+                j++;                                                            \
+            }                                                                   \
+            if (j < jend_) {                                                    \
+                KSWV_NEON_U8_CELL_PAIR(APPLY_BND, BND0, BND1, NEED_DUMMY, d1, d1b) \
+                j++;                                                            \
+                d1 = d1b;                                                       \
+            }                                                                   \
+            if ((j % QE_BLK) == 0) { CKPT }                                     \
+        }
+#else
+#define KSWV_U8_BLOCKS2(hi, CKPT, APPLY_BND, BND0, BND1, NEED_DUMMY)            \
+        KSWV_U8_BLOCKS(hi, CKPT,                                                \
+            KSWV_NEON_U8_CELL_PAIR(APPLY_BND, BND0, BND1, NEED_DUMMY, d1, d1))
+#endif
 #define KSWV_U8_CKPT_PAIR                                                       \
         if (LazyQE) {                                                           \
             vst1q_u8(blockMax  + (j / QE_BLK - 1) * SIMD_WIDTH8, imax0);        \
@@ -1099,6 +1138,9 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
             uint8x16_t col0 = zero_vec, col1 = zero_vec;
             uint8x16_t e11_0 = zero_vec, e11_1 = zero_vec;
             uint8x16_t d1 = zero_vec, j_v = zero_vec;
+#if defined(__APPLE__)
+            uint8x16_t d1b = zero_vec;   /* alternate diagonal register, KSWV_U8_BLOCKS2 */
+#endif
 
             /* Freed-cell override built once per row for BOTH rows of the pair
              * (s1 differs between them); see the one-row body below for the
@@ -1119,22 +1161,17 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
 
             int j = 0;
             if (i + 1 < minLen1) {
-                KSWV_U8_BLOCKS(jdummy, KSWV_U8_CKPT_PAIR,
-                    KSWV_NEON_U8_CELL_PAIR(false, zero_vec, zero_vec, false))
-                KSWV_U8_BLOCKS(jsplit, KSWV_U8_CKPT_PAIR,
-                    KSWV_NEON_U8_CELL_PAIR(false, zero_vec, zero_vec, true))
+                KSWV_U8_BLOCKS2(jdummy, KSWV_U8_CKPT_PAIR, false, zero_vec, zero_vec, false)
+                KSWV_U8_BLOCKS2(jsplit, KSWV_U8_CKPT_PAIR, false, zero_vec, zero_vec, true)
             } else {
                 const uint8x16_t rb0 = vtstq_u8(s1_0, highbit_vec);
                 const uint8x16_t rb1 = vtstq_u8(s1_1, highbit_vec);
-                KSWV_U8_BLOCKS(jdummy, KSWV_U8_CKPT_PAIR,
-                    KSWV_NEON_U8_CELL_PAIR(true, rb0, rb1, false))
-                KSWV_U8_BLOCKS(jsplit, KSWV_U8_CKPT_PAIR,
-                    KSWV_NEON_U8_CELL_PAIR(true, rb0, rb1, true))
+                KSWV_U8_BLOCKS2(jdummy, KSWV_U8_CKPT_PAIR, true, rb0, rb1, false)
+                KSWV_U8_BLOCKS2(jsplit, KSWV_U8_CKPT_PAIR, true, rb0, rb1, true)
             }
-            KSWV_U8_BLOCKS(ncol, KSWV_U8_CKPT_PAIR,
-                KSWV_NEON_U8_CELL_PAIR(true,
-                                       vtstq_u8(vorrq_u8(s1_0, s2), highbit_vec),
-                                       vtstq_u8(vorrq_u8(s1_1, s2), highbit_vec), true))
+            KSWV_U8_BLOCKS2(ncol, KSWV_U8_CKPT_PAIR, true,
+                            vtstq_u8(vorrq_u8(s1_0, s2), highbit_vec),
+                            vtstq_u8(vorrq_u8(s1_1, s2), highbit_vec), true)
 
             /* Row epilogues in row order: a freeze at row i must suppress row
              * i+1. LazyQE rescans row i from the in-place H0 (column j at index
@@ -1324,6 +1361,7 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
         i += 1;
     }
 #undef KSWV_NEON_U8_CELL_PAIR
+#undef KSWV_U8_BLOCKS2
 #undef KSWV_U8_CKPT_ONE
 #undef KSWV_U8_CKPT_PAIR
 #undef KSWV_U8_BLOCKS
@@ -1904,6 +1942,31 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
             for (; j < jend_; j++) BODY                                         \
             if ((j % QE_BLK) == 0) { CKPT }                                     \
         }
+    /* Two-column unrolled twin for the two-row body (see KSWV_U8_BLOCKS2);
+     * gated on __APPLE__ (Apple silicon), the rolled loop elsewhere. See
+     * KSWV_U8_BLOCKS2 for why __APPLE__ and not APPLE_SILICON. */
+#if defined(__APPLE__)
+#define KSWV_16_BLOCKS2(hi, CKPT, APPLY_BND, BND0, BND1)                        \
+        for (; j < (hi); ) {                                                    \
+            const int jnb_ = ((j / QE_BLK) + 1) * QE_BLK;                       \
+            const int jend_ = jnb_ < (hi) ? jnb_ : (hi);                        \
+            for (; j + 1 < jend_; ) {                                           \
+                KSWV_NEON_16_CELL_PAIR(APPLY_BND, BND0, BND1, d1, d1b)          \
+                j++;                                                            \
+                KSWV_NEON_16_CELL_PAIR(APPLY_BND, BND0, BND1, d1b, d1)          \
+                j++;                                                            \
+            }                                                                   \
+            if (j < jend_) {                                                    \
+                KSWV_NEON_16_CELL_PAIR(APPLY_BND, BND0, BND1, d1, d1b)          \
+                j++;                                                            \
+                d1 = d1b;                                                       \
+            }                                                                   \
+            if ((j % QE_BLK) == 0) { CKPT }                                     \
+        }
+#else
+#define KSWV_16_BLOCKS2(hi, CKPT, APPLY_BND, BND0, BND1)                        \
+        KSWV_16_BLOCKS(hi, CKPT, KSWV_NEON_16_CELL_PAIR(APPLY_BND, BND0, BND1, d1, d1))
+#endif
 #define KSWV_16_CKPT_PAIR                                                       \
         if (LazyQE) {                                                           \
             vst1q_s16(blockMax  + (j / QE_BLK - 1) * SIMD_WIDTH16, imax0);      \
@@ -1914,11 +1977,11 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
 
     /* Two-target-row cell: rows i and i+1 at column j in one body; the int16
      * twin of KSWV_NEON_U8_CELL_PAIR. Row i's diagonal is H0[j]; row i+1's is
-     * row i's previous-column H (d1, register) and its vertical carry is row
-     * i's f21_0 (register). LazyQE writes row i's H back into the dead
+     * row i's previous-column H (passed in via DIN) and its vertical carry is
+     * row i's f21_0 (register). LazyQE writes row i's H back into the dead
      * diagonal slot H0[j] for the post-row rescan and checkpoints both rows'
      * running maxima; otherwise the argmax column is tracked inline (l_vec). */
-#define KSWV_NEON_16_CELL_PAIR(APPLY_BND, BND0, BND1)                           \
+#define KSWV_NEON_16_CELL_PAIR(APPLY_BND, BND0, BND1, DIN, DOUT)                \
     {                                                                           \
         int16x8_t s2  = vld1q_s16(seq2SoA + j * SIMD_WIDTH16);                  \
         int16x8_t f11 = vld1q_s16(F + (j + 1) * SIMD_WIDTH16);                  \
@@ -1937,10 +2000,10 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
         e11_0 = vmaxq_s16(vsubq_s16(mf0, oe_ins_vec), vsubq_s16(e11_0, e_ins_vec)); \
         int16x8_t f21_0 = vmaxq_s16(vsubq_s16(me0, oe_del_vec),                 \
                                     vsubq_s16(f11, e_del_vec));                 \
-        /* ---- Row i+1 (diagonal d1 = row i's prev-col H; vcarry f21_0) --- */ \
+        /* ---- Row i+1 (diagonal DIN = row i's prev-col H; vcarry f21_0) -- */ \
         int16x8_t sbt1;                                                         \
         KSWV16_SBT(s1_1, s2, sbt1, active_frread_1);                            \
-        int16x8_t m11_1 = vaddq_s16(d1, sbt1);                                  \
+        int16x8_t m11_1 = vaddq_s16((DIN), sbt1);                               \
         if (APPLY_BND) m11_1 = KSWV16_ZERO_BND(m11_1, (BND1));                  \
         int16x8_t me1  = vmaxq_s16(vmaxq_s16(m11_1, e11_1), zero_vec);          \
         int16x8_t h11_1 = vmaxq_s16(me1, f21_0);                                \
@@ -1952,7 +2015,7 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
                                     vsubq_s16(f21_0, e_del_vec));               \
         vst1q_s16(H1 + (j + 1) * SIMD_WIDTH16, h11_1);                          \
         vst1q_s16(F  + (j + 1) * SIMD_WIDTH16, f21_1);                          \
-        d1 = h11_0;                                                             \
+        (DOUT) = h11_0;                                                         \
         if (!LazyQE) l_vec = vaddq_s16(l_vec, one_vec);                         \
     }
 
@@ -1967,6 +2030,9 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
             int16x8_t col0 = zero_vec, col1 = zero_vec;
             int16x8_t e11_0 = zero_vec, e11_1 = zero_vec;
             int16x8_t d1 = zero_vec, l_vec = zero_vec;
+#if defined(__APPLE__)
+            int16x8_t d1b = zero_vec;    /* alternate diagonal register, KSWV_16_BLOCKS2 */
+#endif
 
             /* Rank-1 freed-cell override per row (see the one-row body). */
             int16x8_t freedval_vec16, active_frread_0, active_frread_1;
@@ -1985,18 +2051,15 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
 
             int j = 0;
             if (i + 1 < minLen1) {
-                KSWV_16_BLOCKS(jsplit, KSWV_16_CKPT_PAIR,
-                    KSWV_NEON_16_CELL_PAIR(false, zero_u16, zero_u16))
+                KSWV_16_BLOCKS2(jsplit, KSWV_16_CKPT_PAIR, false, zero_u16, zero_u16)
             } else {
                 const uint16x8_t rb0 = KSWV16_BND(s1_0);
                 const uint16x8_t rb1 = KSWV16_BND(s1_1);
-                KSWV_16_BLOCKS(jsplit, KSWV_16_CKPT_PAIR,
-                    KSWV_NEON_16_CELL_PAIR(true, rb0, rb1))
+                KSWV_16_BLOCKS2(jsplit, KSWV_16_CKPT_PAIR, true, rb0, rb1)
             }
-            KSWV_16_BLOCKS(ncol, KSWV_16_CKPT_PAIR,
-                KSWV_NEON_16_CELL_PAIR(true,
-                                       KSWV16_BND(vorrq_s16(s1_0, s2)),
-                                       KSWV16_BND(vorrq_s16(s1_1, s2))))
+            KSWV_16_BLOCKS2(ncol, KSWV_16_CKPT_PAIR, true,
+                            KSWV16_BND(vorrq_s16(s1_0, s2)),
+                            KSWV16_BND(vorrq_s16(s1_1, s2)))
 
             /* Row epilogues in row order (a freeze at row i must suppress row
              * i+1). LazyQE rescans row i from the in-place H0 (column j at
@@ -2066,6 +2129,7 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
         i += 1;
     }
 #undef KSWV_NEON_16_CELL_PAIR
+#undef KSWV_16_BLOCKS2
 #undef KSWV_NEON_16_CELL
 #undef KSWV_16_CKPT_ONE
 #undef KSWV_16_CKPT_PAIR
