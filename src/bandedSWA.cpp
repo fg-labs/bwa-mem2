@@ -4381,6 +4381,15 @@ static inline __m128i blendv_fullmask8(__m128i a, __m128i b, __m128i mask)
 // any lane width, because a full-width lane's bytes agree (a 16-bit lane is
 // 0x0000 or 0xFFFF). x86 keeps the native movemask (== 0xFFFF is "all set" for a
 // full-width mask regardless of lane width, matching the old & dmask16 form).
+//
+// NEON any_lane_set8 note: on ARM the reduce is vmaxvq_u8(v) != 0, which is true
+// iff ANY byte of v is nonzero -- so it answers correctly for a numeric (not
+// 0x00/0xFF) input too. The Apple-only 8-bit z-drop epilogue gate relies on this:
+// it ORs the byte-domain need_z difference (0..255) into the mask before calling
+// any_lane_set8. Do NOT extend that numeric-input use to the x86 branch:
+// _mm_movemask_epi8 tests each byte's high bit only, so a small nonzero byte
+// (e.g. 0x01) reads as unset -- correct only for a true 0x00/0xFF mask. No
+// numeric caller compiles on x86 (the gate is __APPLE__-only, hence NEON).
 static inline bool any_lane_set8(__m128i mask)
 {
 #if defined(__ARM_NEON) || defined(__aarch64__)
@@ -6454,7 +6463,45 @@ void BandedPairWiseSW::smithWaterman128_8(uint8_t seq1SoA[],
         // Per-lane wide updates (O(rows)): best-score row (xrow), best-gscore
         // row (ierow), and the z-drop test — all done in wide scalars so row
         // distances that exceed int8 for long reads are handled exactly.
-        {
+        //
+        // Run the block only on rows where some lane can actually change:
+        //   * xrow / best_abs change only where cmp is set (the global max
+        //     advanced this row; best_abs is always >= maxScore128 otherwise,
+        //     so max(best_abs, ms) is the identity);
+        //   * gbest_abs / ierow change only where qfire128 is set;
+        //   * a lane can z-drop only if drop - dif > zdrop with dif >= 0, so
+        //     drop > zdrop is necessary, and drop = maxScore128 - maxRS1 is
+        //     exact in bytes on alive lanes (both are [0,255] under the routing
+        //     envelope). subs_epu8 twice: nonzero iff drop > zdrop. Dead lanes
+        //     may read as "needed" here; the block masks them with exit0 anyway,
+        //     so that only costs a skipped skip.
+        // With the certified adaptive band defaulting to w = 20, a row is ~41
+        // cells and this block (~140 instructions plus its stack round trips)
+        // was roughly a third of it; most rows set none of the three.
+        // Byte-identical: when the gate is clear every store below is a no-op.
+        //
+        // Apple silicon only. The gate is a win there (+1 to +2.5% on the
+        // isolated kernel) but a loss on Neoverse V2 (-0.5 to -1.5%): the per-row
+        // reduction and branch cost more than the block they skip on the minority
+        // of post-peak rows. Other targets run the block on every row, exactly as
+        // before. NOTE: do not gate on APPLE_SILICON here -- simd_compat.h defines
+        // it as 1 for EVERY aarch64/NEON build (it is the codebase-wide NEON
+        // synonym), so it is true on Graviton too and cannot express "Apple only".
+        // __APPLE__ alone is NOT enough either: Intel macOS also defines __APPLE__
+        // but compiles the x86 SSE branch of any_lane_set8, whose _mm_movemask_epi8
+        // tests each byte's high bit only -- so the numeric need_z input (0..255)
+        // ORed into the mask below would mis-read small nonzero bytes (0x01..0x7f)
+        // as unset, wrongly skip the wide z-drop block, and change alignment
+        // fields. Require Apple AND ARM so Intel macOS falls to the safe #else.
+#if defined(__APPLE__) && (defined(__ARM_NEON) || defined(__aarch64__))
+        const __m128i need_z = (zdrop > 0)
+            ? _mm_subs_epu8(_mm_subs_epu8(maxScore128, maxRS1), zdrop128)
+            : zero128;
+        const bool need_wide = any_lane_set8(_mm_or_si128(_mm_or_si128(cmp, qfire128), need_z));
+#else
+        const bool need_wide = true;
+#endif
+        if (need_wide) {
             int8_t  cmp_a[SIMD_WIDTH8]      __attribute((aligned(16)));
             int8_t  y1_a[SIMD_WIDTH8]       __attribute((aligned(16)));
             int8_t  y_a[SIMD_WIDTH8]        __attribute((aligned(16)));
