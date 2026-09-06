@@ -1055,18 +1055,32 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
             vst1q_u8(H1 + (j + 1) * SIMD_WIDTH8, h11_1);                         \
             vst1q_u8(F + (j + 1) * SIMD_WIDTH8, f21_1);                          \
             d1 = h11_0;                                                          \
-            if (LazyQE) {                                                        \
-                /* Row-max checkpoints for both rows, once per QE_BLK columns,  \
-                 * same cadence as the one-row body. */                          \
-                if (j == qeNext) {                                               \
-                    vst1q_u8(blockMax  + qeBlk * SIMD_WIDTH8, imax0);            \
-                    vst1q_u8(blockMax1 + qeBlk * SIMD_WIDTH8, imax1);            \
-                    qeBlk++; qeNext += QE_BLK;                                   \
-                }                                                                \
-            } else {                                                             \
-                j_v = vaddq_u8(j_v, one_vec);                                    \
-            }                                                                    \
+            if (!LazyQE) j_v = vaddq_u8(j_v, one_vec);                           \
         }
+
+    /* Column-range driver: run BODY over [j, hi) in QE_BLK-aligned blocks and
+     * run CKPT (the running-row-max checkpoint store) at every block boundary
+     * crossed. Replaces a per-cell `j == qeNext` compare-and-branch: the cell
+     * bodies are branch-free and the checkpoint is one store per QE_BLK
+     * columns. A range that ends off a block boundary (a partial final block,
+     * or the biased body's jdummy) leaves the block open for the next range,
+     * exactly as the per-cell cadence did; the epilogue closes the last
+     * partial block. Block b is written after column QE_BLK*b + QE_BLK - 1,
+     * the same cell the per-cell test fired on. */
+#define KSWV_U8_BLOCKS(hi, CKPT, BODY)                                          \
+        for (; j < (hi); ) {                                                    \
+            const int jnb_ = ((j / QE_BLK) + 1) * QE_BLK;                       \
+            const int jend_ = jnb_ < (hi) ? jnb_ : (hi);                        \
+            for (; j < jend_; j++) BODY                                         \
+            if ((j % QE_BLK) == 0) { CKPT }                                     \
+        }
+#define KSWV_U8_CKPT_PAIR                                                       \
+        if (LazyQE) {                                                           \
+            vst1q_u8(blockMax  + (j / QE_BLK - 1) * SIMD_WIDTH8, imax0);        \
+            vst1q_u8(blockMax1 + (j / QE_BLK - 1) * SIMD_WIDTH8, imax1);        \
+        }
+#define KSWV_U8_CKPT_ONE                                                        \
+        vst1q_u8(blockMax + (j / QE_BLK - 1) * SIMD_WIDTH8, imax_vec);
 
     int i = 0, limit = nrow;
     while (i < nrow)
@@ -1085,9 +1099,6 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
             uint8x16_t col0 = zero_vec, col1 = zero_vec;
             uint8x16_t e11_0 = zero_vec, e11_1 = zero_vec;
             uint8x16_t d1 = zero_vec, j_v = zero_vec;
-            /* Row-max checkpoint cursor for the LazyQE rescan (both rows). */
-            int qeNext = QE_BLK - 1, qeBlk = 0;
-            (void) qeNext; (void) qeBlk;
 
             /* Freed-cell override built once per row for BOTH rows of the pair
              * (s1 differs between them); see the one-row body below for the
@@ -1108,22 +1119,22 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
 
             int j = 0;
             if (i + 1 < minLen1) {
-                for (; j < jdummy; j++)
-                    KSWV_NEON_U8_CELL_PAIR(false, zero_vec, zero_vec, false)
-                for (; j < jsplit; j++)
-                    KSWV_NEON_U8_CELL_PAIR(false, zero_vec, zero_vec, true)
+                KSWV_U8_BLOCKS(jdummy, KSWV_U8_CKPT_PAIR,
+                    KSWV_NEON_U8_CELL_PAIR(false, zero_vec, zero_vec, false))
+                KSWV_U8_BLOCKS(jsplit, KSWV_U8_CKPT_PAIR,
+                    KSWV_NEON_U8_CELL_PAIR(false, zero_vec, zero_vec, true))
             } else {
                 const uint8x16_t rb0 = vtstq_u8(s1_0, highbit_vec);
                 const uint8x16_t rb1 = vtstq_u8(s1_1, highbit_vec);
-                for (; j < jdummy; j++)
-                    KSWV_NEON_U8_CELL_PAIR(true, rb0, rb1, false)
-                for (; j < jsplit; j++)
-                    KSWV_NEON_U8_CELL_PAIR(true, rb0, rb1, true)
+                KSWV_U8_BLOCKS(jdummy, KSWV_U8_CKPT_PAIR,
+                    KSWV_NEON_U8_CELL_PAIR(true, rb0, rb1, false))
+                KSWV_U8_BLOCKS(jsplit, KSWV_U8_CKPT_PAIR,
+                    KSWV_NEON_U8_CELL_PAIR(true, rb0, rb1, true))
             }
-            for (; j < ncol; j++)
+            KSWV_U8_BLOCKS(ncol, KSWV_U8_CKPT_PAIR,
                 KSWV_NEON_U8_CELL_PAIR(true,
                                        vtstq_u8(vorrq_u8(s1_0, s2), highbit_vec),
-                                       vtstq_u8(vorrq_u8(s1_1, s2), highbit_vec), true)
+                                       vtstq_u8(vorrq_u8(s1_1, s2), highbit_vec), true))
 
             /* Row epilogues in row order: a freeze at row i must suppress row
              * i+1. LazyQE rescans row i from the in-place H0 (column j at index
@@ -1277,37 +1288,26 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
                                                                                 \
             vst1q_u8(H1 + (j + 1) * SIMD_WIDTH8, h11);                          \
             vst1q_u8(F + (j + 1) * SIMD_WIDTH8, f21);                           \
-            /* Checkpoint the running row max once per QE_BLK columns, so the   \
-             * post-row query-end recovery can find the block holding the max   \
-             * without rescanning the whole row. One vector store per QE_BLK    \
-             * cells, on a branch taken 1-in-QE_BLK with a fixed stride -- the  \
-             * predictor sees a regular pattern, and the four unswitched column \
-             * loops stay intact. */                                            \
-            if (j == qeNext) {                                                  \
-                vst1q_u8(blockMax + qeBlk * SIMD_WIDTH8, imax_vec);             \
-                qeBlk++; qeNext += QE_BLK;                                      \
-            }                                                                   \
+            /* The running row max is checkpointed once per QE_BLK columns by  \
+             * the KSWV_U8_BLOCKS driver (see above), so the post-row query-end \
+             * recovery can find the block holding the max without rescanning  \
+             * the whole row. */                                                \
         }
 
-        int qeNext = QE_BLK - 1, qeBlk = 0;
         j = 0;
         if (i < minLen1) {
             /* No lane has begun reference padding and no column below jsplit
              * carries query padding: the mask is provably all-zero here. */
-            for (; j < jdummy; j++)
-                KSWV_NEON_U8_CELL(false, zero_vec, false)
-            for (; j < jsplit; j++)
-                KSWV_NEON_U8_CELL(false, zero_vec, true)
+            KSWV_U8_BLOCKS(jdummy, KSWV_U8_CKPT_ONE, KSWV_NEON_U8_CELL(false, zero_vec, false))
+            KSWV_U8_BLOCKS(jsplit, KSWV_U8_CKPT_ONE, KSWV_NEON_U8_CELL(false, zero_vec, true))
         } else {
             /* Reference half only; loop-invariant across j. */
             const uint8x16_t rowboundary = vtstq_u8(s1, highbit_vec);
-            for (; j < jdummy; j++)
-                KSWV_NEON_U8_CELL(true, rowboundary, false)
-            for (; j < jsplit; j++)
-                KSWV_NEON_U8_CELL(true, rowboundary, true)
+            KSWV_U8_BLOCKS(jdummy, KSWV_U8_CKPT_ONE, KSWV_NEON_U8_CELL(true, rowboundary, false))
+            KSWV_U8_BLOCKS(jsplit, KSWV_U8_CKPT_ONE, KSWV_NEON_U8_CELL(true, rowboundary, true))
         }
-        for (; j < ncol; j++)
-            KSWV_NEON_U8_CELL(true, vtstq_u8(vorrq_u8(s1, s2), highbit_vec), true)
+        KSWV_U8_BLOCKS(ncol, KSWV_U8_CKPT_ONE,
+            KSWV_NEON_U8_CELL(true, vtstq_u8(vorrq_u8(s1, s2), highbit_vec), true))
 #undef KSWV_NEON_U8_CELL
 
         /* One-row epilogue: recover qe lazily from the stored H (EPI_INLINE_QE
@@ -1324,6 +1324,9 @@ int kswv::kswv_neon_u8_impl(uint8_t seq1SoA[],
         i += 1;
     }
 #undef KSWV_NEON_U8_CELL_PAIR
+#undef KSWV_U8_CKPT_ONE
+#undef KSWV_U8_CKPT_PAIR
+#undef KSWV_U8_BLOCKS
 #undef KSWV_U8_ALL_DONE
 #undef KSWV_U8_EPILOGUE
 
@@ -1888,11 +1891,26 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
                                   vsubq_s16(f11, e_del_vec));                   \
         vst1q_s16(H1 + (j + 1) * SIMD_WIDTH16, h11);                            \
         vst1q_s16(F  + (j + 1) * SIMD_WIDTH16, f21);                            \
-        if (j == qeNext) {                                                      \
-            vst1q_s16(blockMax + qeBlk * SIMD_WIDTH16, imax_vec);               \
-            qeBlk++; qeNext += QE_BLK;                                          \
-        }                                                                       \
     }
+
+    /* Column-range driver and checkpoint stores: the int16 twins of
+     * KSWV_U8_BLOCKS / KSWV_U8_CKPT_* (see the u8 kernel). jsplit and ncol are
+     * multiples of 8 here, so a range may end mid-block; the block stays open
+     * for the next range and the epilogue closes the last partial one. */
+#define KSWV_16_BLOCKS(hi, CKPT, BODY)                                          \
+        for (; j < (hi); ) {                                                    \
+            const int jnb_ = ((j / QE_BLK) + 1) * QE_BLK;                       \
+            const int jend_ = jnb_ < (hi) ? jnb_ : (hi);                        \
+            for (; j < jend_; j++) BODY                                         \
+            if ((j % QE_BLK) == 0) { CKPT }                                     \
+        }
+#define KSWV_16_CKPT_PAIR                                                       \
+        if (LazyQE) {                                                           \
+            vst1q_s16(blockMax  + (j / QE_BLK - 1) * SIMD_WIDTH16, imax0);      \
+            vst1q_s16(blockMax1 + (j / QE_BLK - 1) * SIMD_WIDTH16, imax1);      \
+        }
+#define KSWV_16_CKPT_ONE                                                        \
+        vst1q_s16(blockMax + (j / QE_BLK - 1) * SIMD_WIDTH16, imax_vec);
 
     /* Two-target-row cell: rows i and i+1 at column j in one body; the int16
      * twin of KSWV_NEON_U8_CELL_PAIR. Row i's diagonal is H0[j]; row i+1's is
@@ -1935,15 +1953,7 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
         vst1q_s16(H1 + (j + 1) * SIMD_WIDTH16, h11_1);                          \
         vst1q_s16(F  + (j + 1) * SIMD_WIDTH16, f21_1);                          \
         d1 = h11_0;                                                             \
-        if (LazyQE) {                                                           \
-            if (j == qeNext) {                                                  \
-                vst1q_s16(blockMax  + qeBlk * SIMD_WIDTH16, imax0);             \
-                vst1q_s16(blockMax1 + qeBlk * SIMD_WIDTH16, imax1);             \
-                qeBlk++; qeNext += QE_BLK;                                      \
-            }                                                                   \
-        } else {                                                                \
-            l_vec = vaddq_s16(l_vec, one_vec);                                  \
-        }                                                                       \
+        if (!LazyQE) l_vec = vaddq_s16(l_vec, one_vec);                         \
     }
 
     int i = 0, limit = nrow;
@@ -1957,8 +1967,6 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
             int16x8_t col0 = zero_vec, col1 = zero_vec;
             int16x8_t e11_0 = zero_vec, e11_1 = zero_vec;
             int16x8_t d1 = zero_vec, l_vec = zero_vec;
-            int qeNext = QE_BLK - 1, qeBlk = 0;
-            (void) qeNext; (void) qeBlk;
 
             /* Rank-1 freed-cell override per row (see the one-row body). */
             int16x8_t freedval_vec16, active_frread_0, active_frread_1;
@@ -1977,18 +1985,18 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
 
             int j = 0;
             if (i + 1 < minLen1) {
-                for (; j < jsplit; j++)
-                    KSWV_NEON_16_CELL_PAIR(false, zero_u16, zero_u16)
+                KSWV_16_BLOCKS(jsplit, KSWV_16_CKPT_PAIR,
+                    KSWV_NEON_16_CELL_PAIR(false, zero_u16, zero_u16))
             } else {
                 const uint16x8_t rb0 = KSWV16_BND(s1_0);
                 const uint16x8_t rb1 = KSWV16_BND(s1_1);
-                for (; j < jsplit; j++)
-                    KSWV_NEON_16_CELL_PAIR(true, rb0, rb1)
+                KSWV_16_BLOCKS(jsplit, KSWV_16_CKPT_PAIR,
+                    KSWV_NEON_16_CELL_PAIR(true, rb0, rb1))
             }
-            for (; j < ncol; j++)
+            KSWV_16_BLOCKS(ncol, KSWV_16_CKPT_PAIR,
                 KSWV_NEON_16_CELL_PAIR(true,
                                        KSWV16_BND(vorrq_s16(s1_0, s2)),
-                                       KSWV16_BND(vorrq_s16(s1_1, s2)))
+                                       KSWV16_BND(vorrq_s16(s1_1, s2))))
 
             /* Row epilogues in row order (a freeze at row i must suppress row
              * i+1). LazyQE rescans row i from the in-place H0 (column j at
@@ -2017,7 +2025,6 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
         int16x8_t e11 = zero_vec;
         const int16x8_t s1 = vld1q_s16(seq1SoA + i * SIMD_WIDTH16);
         int16x8_t imax_vec = zero_vec;
-        int qeNext = QE_BLK - 1, qeBlk = 0;
 
         /* Rank-1 freed-cell override (issue 173 + TAPS neutral), folded into ONE
          * per-row target base active_frread16 — the u16 analog of
@@ -2045,15 +2052,12 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
 
         int j = 0;
         if (i < minLen1) {
-            for (; j < jsplit; j++)
-                KSWV_NEON_16_CELL(false, zero_u16)
+            KSWV_16_BLOCKS(jsplit, KSWV_16_CKPT_ONE, KSWV_NEON_16_CELL(false, zero_u16))
         } else {
             const uint16x8_t rowboundary = KSWV16_BND(s1);
-            for (; j < jsplit; j++)
-                KSWV_NEON_16_CELL(true, rowboundary)
+            KSWV_16_BLOCKS(jsplit, KSWV_16_CKPT_ONE, KSWV_NEON_16_CELL(true, rowboundary))
         }
-        for (; j < ncol; j++)
-            KSWV_NEON_16_CELL(true, KSWV16_BND(vorrq_s16(s1, s2)))
+        KSWV_16_BLOCKS(ncol, KSWV_16_CKPT_ONE, KSWV_NEON_16_CELL(true, KSWV16_BND(vorrq_s16(s1, s2))))
 
         KSWV_16_EPILOGUE(i, imax_vec, false, zero_vec, blockMax, H1 + SIMD_WIDTH16)
         if (KSWV_16_ALL_FROZEN()) { limit = i; i += 1; break; }
@@ -2063,6 +2067,9 @@ int kswv::kswv_neon_16_impl(int16_t seq1SoA[],
     }
 #undef KSWV_NEON_16_CELL_PAIR
 #undef KSWV_NEON_16_CELL
+#undef KSWV_16_CKPT_ONE
+#undef KSWV_16_CKPT_PAIR
+#undef KSWV_16_BLOCKS
 #undef KSWV_16_ALL_FROZEN
 #undef KSWV_16_EPILOGUE
 #undef KSWV16_SBT
