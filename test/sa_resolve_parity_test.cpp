@@ -98,6 +98,15 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Usage: %s <bwa-mem3 index prefix>\n", argv[0]);
         return 2;
     }
+#if !defined(__aarch64__)
+    /* The pipelined resolver under test (get_sa_entries_prefetch / call_one_step)
+     * has a NEON implementation and a scalar fallback; off AArch64 this gate would
+     * exercise the fallback and pass vacuously (the scalar resolver against the
+     * scalar reference). Report an explicit skip so a non-NEON run is never
+     * mistaken for NEON parity coverage. */
+    printf("SA resolve PARITY SKIP (not an AArch64/NEON target)\n");
+    return 0;
+#endif
     FMI_search *fmi = new FMI_search(argv[1]);
     fmi->load_index();
 

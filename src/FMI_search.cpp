@@ -2318,6 +2318,19 @@ int64_t FMI_search::call_one_step(int64_t pos, int64_t &sa_entry, int64_t &offse
     } // else
 }
 
+/* Lane count of the pipelined compressed-SA resolver (get_sa_entries_prefetch);
+ * see the BWA3_SA_LANES note there. */
+#define SA_RESOLVE_LANES_DEFAULT 20
+#define SA_RESOLVE_LANES_MAX 64
+/* The resolver's lane arrays (working_set/map_pos/offset) are sized to
+ * SA_RESOLVE_LANES_MAX and indexed by sa_batch_size, which is clamped into
+ * [1, SA_RESOLVE_LANES_MAX] for env overrides but defaults to
+ * SA_RESOLVE_LANES_DEFAULT unclamped -- guard the default against silently
+ * overrunning those stack arrays if it is ever raised past the array size. */
+static_assert(SA_RESOLVE_LANES_DEFAULT >= 1 &&
+              SA_RESOLVE_LANES_DEFAULT <= SA_RESOLVE_LANES_MAX,
+              "SA_RESOLVE_LANES_DEFAULT must be within [1, SA_RESOLVE_LANES_MAX]");
+
 /* Thread-local scratch for the pos_ar/map_ar staging buffers below. These were
  * two _mm_malloc/_mm_free per call, and this function runs once per read — so on
  * a WGS run that is tens of millions of aligned-allocation round-trips. The pair
@@ -2402,9 +2415,36 @@ void FMI_search::get_sa_entries_prefetch(SMEM *smemArray, int64_t *coordArray,
     
     id_ += id;
     
-    const int32_t sa_batch_size = 20;
-    int64_t working_set[sa_batch_size], map_pos[sa_batch_size];;
-    int64_t offset[sa_batch_size] = {-1};
+    /* Number of SA rows walked concurrently. Each lane's next checkpoint block
+     * is prefetched when the lane is (re)staged, so the lane count sets how
+     * many block fetches are in flight; it does not affect results, which are
+     * stored by position. BWA3_SA_LANES overrides the default for tuning; out
+     * of range values (below 1 or above SA_RESOLVE_LANES_MAX) are ignored. */
+    static const int32_t sa_batch_size = []() {
+        int32_t lanes = SA_RESOLVE_LANES_DEFAULT;
+        const char *e = getenv("BWA3_SA_LANES");
+        if (e != NULL) {
+            // Strict parse: atoi accepts a numeric prefix ("1x" -> 1) and has
+            // undefined behavior when the value overflows int. Match the
+            // BWA3_LOAD_THREADS parse in index_load_threads -- reject empty,
+            // trailing-garbage, and overflowed input, then keep values in
+            // [1, SA_RESOLVE_LANES_MAX]. On anything else warn and keep the
+            // default (ignore-and-continue, no hard exit).
+            char *end = NULL;
+            errno = 0;
+            const long v = strtol(e, &end, 10);
+            if (errno != 0 || end == e || *end != '\0' ||
+                v < 1 || v > SA_RESOLVE_LANES_MAX) {
+                fprintf(stderr, "[W::get_sa_entries_prefetch] ignoring BWA3_SA_LANES=%s (expected 1..%d)\n",
+                        e, (int) SA_RESOLVE_LANES_MAX);
+            } else {
+                lanes = (int32_t) v;
+            }
+        }
+        return lanes;
+    }();
+    int64_t working_set[SA_RESOLVE_LANES_MAX], map_pos[SA_RESOLVE_LANES_MAX];
+    int64_t offset[SA_RESOLVE_LANES_MAX] = {-1};
     
     int i = 0, j = 0;    
     while(i<id && j<sa_batch_size)
