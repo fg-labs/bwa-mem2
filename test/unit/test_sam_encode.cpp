@@ -74,15 +74,31 @@ std::vector<int> lengths() {
 
 TEST_CASE("sam_encode: fwd/rev SEQ and rev QUAL match the scalar reference at every length"
           * doctest::test_suite("unit/sam_encode")) {
+    // One SUBCASE per encoder so doctest reports and --subcase-filters each
+    // independently (per-length subcases are not used: doctest re-enters the
+    // case per subcase path and does not compose with a loop of same-named
+    // subcases -- the lengths, which include the 16-byte-tail boundaries
+    // 16/17/31/32/33, are swept inside each encoder's subcase instead). Whichever
+    // tier is compiled (SAM_FAST_IMPL) is the one under test; CI builds this file
+    // for every tier, so all tiers are compared against the scalar reference.
     std::mt19937 rng(20260906);
-    for (int n : lengths()) {
-        for (int rep = 0; rep < 4; ++rep) {
-            auto codes = random_codes(rng, n);
-            auto quals = random_quals(rng, n);
-            CHECK_MESSAGE(check_one(sam_encode_seq_fwd, ref_seq_fwd, codes, n), "seq_fwd n=" << n);
-            CHECK_MESSAGE(check_one(sam_encode_seq_rev, ref_seq_rev, codes, n), "seq_rev n=" << n);
-            CHECK_MESSAGE(check_one(sam_encode_qual_rev, ref_qual_rev, quals, n), "qual_rev n=" << n);
-        }
+    SUBCASE("seq_fwd") {
+        for (int n : lengths())
+            for (int rep = 0; rep < 4; ++rep)
+                CHECK_MESSAGE(check_one(sam_encode_seq_fwd, ref_seq_fwd, random_codes(rng, n), n),
+                              "seq_fwd n=" << n);
+    }
+    SUBCASE("seq_rev") {
+        for (int n : lengths())
+            for (int rep = 0; rep < 4; ++rep)
+                CHECK_MESSAGE(check_one(sam_encode_seq_rev, ref_seq_rev, random_codes(rng, n), n),
+                              "seq_rev n=" << n);
+    }
+    SUBCASE("qual_rev") {
+        for (int n : lengths())
+            for (int rep = 0; rep < 4; ++rep)
+                CHECK_MESSAGE(check_one(sam_encode_qual_rev, ref_qual_rev, random_quals(rng, n), n),
+                              "qual_rev n=" << n);
     }
 }
 
@@ -118,29 +134,34 @@ TEST_CASE("sam_encode: no access outside [0, n) on either buffer"
           * doctest::test_suite("unit/sam_encode")) {
     std::mt19937 rng(7);
     FencedPage src_page, dst_page;
-    for (int n : {1, 15, 16, 17, 31, 32, 33, 76, 150, 151, 250}) {
-        for (bool src_end : {false, true}) {
-            for (bool dst_end : {false, true}) {
-                auto codes = random_codes(rng, n);
-                auto quals = random_quals(rng, n);
-                std::vector<char> want((size_t) n), got((size_t) n);
+    // One SUBCASE per source/destination placement (the boundary configurations)
+    // so a fault is reported against the exact placement; the lengths, including
+    // the 16-byte-tail boundaries 16/17/31/32/33, sweep inside each.
+    auto run = [&](bool src_end, bool dst_end) {
+        for (int n : {1, 15, 16, 17, 31, 32, 33, 76, 150, 151, 250}) {
+            auto codes = random_codes(rng, n);
+            auto quals = random_quals(rng, n);
+            std::vector<char> want((size_t) n), got((size_t) n);
 
-                uint8_t *s = (uint8_t *) src_page.place(n, src_end);
-                char *d = dst_page.place(n, dst_end);
-                memcpy(s, codes.data(), (size_t) n);
-                sam_encode_seq_fwd(d, s, n); ref_seq_fwd(want.data(), codes.data(), n);
-                memcpy(got.data(), d, (size_t) n);
-                CHECK_MESSAGE(got == want, "seq_fwd fenced n=" << n);
-                sam_encode_seq_rev(d, s, n); ref_seq_rev(want.data(), codes.data(), n);
-                memcpy(got.data(), d, (size_t) n);
-                CHECK_MESSAGE(got == want, "seq_rev fenced n=" << n);
+            uint8_t *s = (uint8_t *) src_page.place(n, src_end);
+            char *d = dst_page.place(n, dst_end);
+            memcpy(s, codes.data(), (size_t) n);
+            sam_encode_seq_fwd(d, s, n); ref_seq_fwd(want.data(), codes.data(), n);
+            memcpy(got.data(), d, (size_t) n);
+            CHECK_MESSAGE(got == want, "seq_fwd fenced n=" << n);
+            sam_encode_seq_rev(d, s, n); ref_seq_rev(want.data(), codes.data(), n);
+            memcpy(got.data(), d, (size_t) n);
+            CHECK_MESSAGE(got == want, "seq_rev fenced n=" << n);
 
-                char *q = src_page.place(n, src_end);
-                memcpy(q, quals.data(), (size_t) n);
-                sam_encode_qual_rev(d, q, n); ref_qual_rev(want.data(), quals.data(), n);
-                memcpy(got.data(), d, (size_t) n);
-                CHECK_MESSAGE(got == want, "qual_rev fenced n=" << n);
-            }
+            char *q = src_page.place(n, src_end);
+            memcpy(q, quals.data(), (size_t) n);
+            sam_encode_qual_rev(d, q, n); ref_qual_rev(want.data(), quals.data(), n);
+            memcpy(got.data(), d, (size_t) n);
+            CHECK_MESSAGE(got == want, "qual_rev fenced n=" << n);
         }
-    }
+    };
+    SUBCASE("src at start, dst at start") { run(false, false); }
+    SUBCASE("src at start, dst at end")   { run(false, true);  }
+    SUBCASE("src at end, dst at start")   { run(true,  false); }
+    SUBCASE("src at end, dst at end")     { run(true,  true);  }
 }
