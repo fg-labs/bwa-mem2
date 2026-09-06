@@ -6186,6 +6186,25 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt_in, const bntseq_t *bns,
 
         _mm_prefetch((const char*) query, _MM_HINT_NTA);
 
+        /* Each chain's reference window (bns_fetch_seq_v2 below) starts with a
+         * ~DRAM-latency miss on pac[] at a position nothing earlier has touched.
+         * Hint the packed bytes around the NEXT chain's first seed while this
+         * one is being built (the window is a few cache lines around that
+         * seed on either strand), and the next read's first chain here, at the
+         * start of this read, so that hint has this read's whole chain loop to
+         * land before the next read's first fetch. Pure hints: byte-identical. */
+#define CHAIN_PAC_PREFETCH(chain_p) do {                                          \
+            const mem_chain_t *_pc = (chain_p);                                   \
+            if (_pc->n > 0) {                                                     \
+                int _is_rev;  /* discarded; bns_depos also reports the strand */    \
+                const int64_t _pb = bns_depos(bns, _pc->seeds[0].rbeg, &_is_rev) >> 2; \
+                __builtin_prefetch(pac + _pb, 0, 1);                              \
+                if (_pb >= 64) __builtin_prefetch(pac + _pb - 64, 0, 1);          \
+                if (_pb + 64 <= (l_pac >> 2)) __builtin_prefetch(pac + _pb + 64, 0, 1); \
+            }                                                                     \
+        } while (0)
+        if (l + 1 < nseq && chain_ar[l + 1].n > 0) CHAIN_PAC_PREFETCH(&chain_ar[l + 1].a[0]);
+
         // aln mem allocation
         av->m = 0;
         for (int j=0; j<chn->n; j++) {
@@ -6202,6 +6221,7 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt_in, const bntseq_t *bns,
             int64_t tmp = 0;
             if (c->n == 0) continue;
 
+            if (j + 1 < chn->n) CHAIN_PAC_PREFETCH(&chn->a[j + 1]);
             _mm_prefetch((const char*) (srtgg + spos + 64), _MM_HINT_NTA);
             _mm_prefetch((const char*) (lim_g), _MM_HINT_NTA);
 
@@ -6786,6 +6806,7 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt_in, const bntseq_t *bns,
             // tprof[MEM_ALN2_DOWN1][tid] += __rdtsc() - tim;
         }
     }
+#undef CHAIN_PAC_PREFETCH
     // tprof[MEM_ALN2_UP][tid] += __rdtsc() - timUP;
 
 
