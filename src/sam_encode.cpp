@@ -45,7 +45,12 @@ static const uint8_t enc_rev_lut[16] = {
 extern "C" {
 
 #if SAM_FAST_IMPL == 1
-/* NEON 16-byte: vqtbl1q_u8 LUT + vminq_u8 clamp + vextq+vrev64q reverse. */
+/* NEON 16-byte: vqtbl1q_u8 LUT + vminq_u8 clamp; the reversed encoders
+ * reverse each 16-byte chunk with a single vqtbl1q_u8 against a {15..0}
+ * index vector (one op, where vextq + vrev64q was two). */
+static const uint8_t rev16_idx[16] = {
+    15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+};
 void sam_encode_seq_fwd(char *dst, const uint8_t *src, int n) {
     const uint8x16_t lut = vld1q_u8(enc_fwd_lut);
     const uint8x16_t four = vdupq_n_u8(4);
@@ -76,11 +81,11 @@ void sam_encode_seq_fwd(char *dst, const uint8_t *src, int n) {
 void sam_encode_seq_rev(char *dst, const uint8_t *src, int n) {
     const uint8x16_t lut = vld1q_u8(enc_rev_lut);
     const uint8x16_t four = vdupq_n_u8(4);
+    const uint8x16_t rev = vld1q_u8(rev16_idx);
     int i = 0;
     while (i + 16 <= n) {
         uint8x16_t v = vld1q_u8(src + n - 16 - i);
-        v = vextq_u8(v, v, 8);
-        v = vrev64q_u8(v);
+        v = vqtbl1q_u8(v, rev);
         uint8x16_t cl  = vminq_u8(v, four);
         uint8x16_t out = vqtbl1q_u8(lut, cl);
         vst1q_u8((uint8_t*)dst + i, out);
@@ -91,8 +96,7 @@ void sam_encode_seq_rev(char *dst, const uint8_t *src, int n) {
             /* Overlapped tail: the first 16 input bytes, reversed, are the
              * last 16 output bytes (see sam_encode_seq_fwd). */
             uint8x16_t v = vld1q_u8(src);
-            v = vextq_u8(v, v, 8);
-            v = vrev64q_u8(v);
+            v = vqtbl1q_u8(v, rev);
             uint8x16_t cl  = vminq_u8(v, four);
             uint8x16_t out = vqtbl1q_u8(lut, cl);
             vst1q_u8((uint8_t*)dst + n - 16, out);
@@ -102,11 +106,11 @@ void sam_encode_seq_rev(char *dst, const uint8_t *src, int n) {
     }
 }
 void sam_encode_qual_rev(char *dst, const char *src, int n) {
+    const uint8x16_t rev = vld1q_u8(rev16_idx);
     int i = 0;
     while (i + 16 <= n) {
         uint8x16_t v = vld1q_u8((const uint8_t*)(src + n - 16 - i));
-        v = vextq_u8(v, v, 8);
-        v = vrev64q_u8(v);
+        v = vqtbl1q_u8(v, rev);
         vst1q_u8((uint8_t*)dst + i, v);
         i += 16;
     }
@@ -114,8 +118,7 @@ void sam_encode_qual_rev(char *dst, const char *src, int n) {
         if (n >= 16) {
             /* Overlapped tail (see sam_encode_seq_fwd). */
             uint8x16_t v = vld1q_u8((const uint8_t*)src);
-            v = vextq_u8(v, v, 8);
-            v = vrev64q_u8(v);
+            v = vqtbl1q_u8(v, rev);
             vst1q_u8((uint8_t*)dst + n - 16, v);
         } else {
             while (i < n) { dst[i] = src[n - 1 - i]; ++i; }
