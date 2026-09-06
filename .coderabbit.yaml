@@ -126,8 +126,8 @@ reviews:
         the ARM-only sse2neon shim (it `#error`s if included on a non-ARM
         target); platform/ISA detection lives in each kernel header's own `#if`
         guard, not here. On ARM the path routes through
-        sse2neon plus hand-written NEON helpers (`_mm_movemask_epi16`,
-        `_mm_blendv_epi16_fast`) that must be semantically identical to the x86
+        sse2neon plus the hand-written NEON helper `_mm_movemask_epi16` that
+        must be semantically identical to the x86
         intrinsics they replace — verify lane order, signedness, and saturation
         element by element, not just "looks equivalent". Flag: a tier-detection
         ladder that keys off a compiler-defined macro (`__SSE4_2__`, `__AVX2__`)

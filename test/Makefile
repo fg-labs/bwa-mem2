@@ -58,14 +58,14 @@ LDFLAGS += $(HTSLIB_static_LDFLAGS)
 
 ifneq ($(IS_ARM),)
     # Keep the ARM cache-line alignment in lock-step with the top-level Makefile:
-    # CACHE_LINE_BYTES feeds SIMD_ALIGNED_ALLOC, so a build overriding
+    # CACHE_LINE_BYTES feeds _mm_malloc, so a build overriding
     # ARM_CACHE_LINE=64 (Neoverse/Graviton) must exercise the same allocation
     # configuration here as in the shipped libbwa.a objects. Command-line and
     # environment overrides win over this default; the top-level test-binaries
     # recipe also forwards it explicitly.
     ARM_CACHE_LINE ?= 128
     # Keep the ARM_CACHE_LINE validation in lock-step with the top-level Makefile:
-    # CACHE_LINE_BYTES must be exactly one supported value, or SIMD_ALIGNED_ALLOC's
+    # CACHE_LINE_BYTES must be exactly one supported value, or _mm_malloc's
     # posix_memalign fails. Guard the token count first ($(filter) matches per
     # word, so "64 128" would slip past a bare membership test; this also rejects
     # empty), then the value itself with the supported values as the $(filter)
