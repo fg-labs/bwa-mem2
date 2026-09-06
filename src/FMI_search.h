@@ -437,6 +437,22 @@ private:
             return smem;
         }
 
+        /* Population count of (*word & *mask) for one 64-bit BWT word.
+         * arm64 has no scalar popcount: __builtin_popcountll lowers to
+         * fmov d,x; cnt.8b; addv.8b; fmov x,d -- two GPR<->SIMD moves on the
+         * k' dependency chain. Loading the word and the mask straight into d
+         * registers (both are memory operands here) leaves one move, the
+         * result. Bit-identical. Other targets keep the scalar builtin. */
+        static inline int64_t occ_popcount64(const uint64_t *word, const uint64_t *mask)
+        {
+#if defined(__ARM_NEON) || defined(__aarch64__) || defined(APPLE_SILICON)
+            const uint8x8_t bits = vreinterpret_u8_u64(vand_u64(vld1_u64(word), vld1_u64(mask)));
+            return (int64_t) vaddv_u8(vcnt_u8(bits));
+#else
+            return (int64_t) __builtin_popcountll(*word & *mask);
+#endif
+        }
+
         /* K-only backward extension for the pure-backward SMEM phase
          * (ls_advance_backward_step). Computes ONLY smem.k and smem.s, leaving
          * smem.l untouched: in the backward phase the reverse-complement interval
@@ -473,7 +489,7 @@ private:
                 const uint64_t oh = blk.one_hot_bwt_str[a];
                 if ((oh >> (CP_MASK - pos)) & 1ULL) {  /* BWT[sp] == a  => s' = 1 */
                     smem.k = count[a] + blk.cp_count[a] +
-                             (int64_t)__builtin_popcountll(oh & one_hot_mask_array[pos]);
+                             occ_popcount64(&blk.one_hot_bwt_str[a], &one_hot_mask_array[pos]);
                     smem.s = 1;
                 } else {                               /* s' = 0; new k is dead */
                     smem.s = 0;
@@ -483,12 +499,10 @@ private:
             const int64_t ep = sp + (int64_t)smem.s;
             const CP_OCC &blk_sp = cp_occ[sp >> CP_SHIFT];
             const CP_OCC &blk_ep = cp_occ[ep >> CP_SHIFT];
-            const uint64_t mask_sp = one_hot_mask_array[sp & CP_MASK];
-            const uint64_t mask_ep = one_hot_mask_array[ep & CP_MASK];
             const int64_t occ_s = blk_sp.cp_count[a] +
-                (int64_t)__builtin_popcountll(blk_sp.one_hot_bwt_str[a] & mask_sp);
+                occ_popcount64(&blk_sp.one_hot_bwt_str[a], &one_hot_mask_array[(sp & CP_MASK)]);
             const int64_t occ_e = blk_ep.cp_count[a] +
-                (int64_t)__builtin_popcountll(blk_ep.one_hot_bwt_str[a] & mask_ep);
+                occ_popcount64(&blk_ep.one_hot_bwt_str[a], &one_hot_mask_array[(ep & CP_MASK)]);
             smem.k = count[a] + occ_s;
             smem.s = occ_e - occ_s;
             return smem;
