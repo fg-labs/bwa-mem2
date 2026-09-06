@@ -215,6 +215,20 @@ else
     fail "backwardext_parity_test: non-zero exit"
 fi
 
+# --- sa_resolve_parity_test ------------------------------------------------
+# The pipelined compressed-SA resolver (get_sa_entries_prefetch / call_one_step)
+# vs a scalar LF walk computed straight from the checkpoint blocks, over every
+# SA row of the fixture plus strided multi-occurrence intervals; gates the
+# arm64 branchless symbol test and NEON occurrence popcount in call_one_step.
+if OUT="$(cd "$HERE" && ./sa_resolve_parity_test "$FIXTURES/phix.fa" 2>&1)"; then
+    echo "$OUT" | grep -q "SA resolve PARITY PASS" \
+        || fail "sa_resolve_parity_test: no PASS line"
+    ok "sa_resolve_parity_test"
+else
+    echo "$OUT"
+    fail "sa_resolve_parity_test: non-zero exit"
+fi
+
 # --- long-read end-to-end (issue 44) --------------------------------------
 # Pre-fix, reads > 151 bp overran the per-thread SMEM buffer (segfault) and
 # reads > 512 bp tripped the MAX_READ_LEN_FOR_LOCKSTEP assert. Post-fix the

@@ -2244,6 +2244,34 @@ int64_t FMI_search::call_one_step(int64_t pos, int64_t &sa_entry, int64_t &offse
         uint64_t *one_hot_bwt_str = cp_occ[occ_id_pp_].one_hot_bwt_str;
         uint8_t b;
 
+#if defined(__ARM_NEON) || defined(__aarch64__) || defined(APPLE_SILICON)
+        /* The BWT symbol at sp is one-hot across the four bit-planes, and the
+         * bases are close to uniformly distributed, so testing the planes one
+         * branch at a time mispredicts on most steps. Test all four at once
+         * and select the symbol without a branch; the empty case (no plane
+         * set) is the sentinel row, kept as the one real branch since it is
+         * nearly never taken. The occurrence count then reuses the k-only
+         * backward step's NEON popcount, whose d-register loads keep the
+         * masked word out of the general-purpose file. Symbol priority
+         * (lowest plane wins) matches the plane-at-a-time test exactly. */
+        const unsigned t0 = (unsigned)((one_hot_bwt_str[0] >> y_pp_) & 1);
+        const unsigned t1 = (unsigned)((one_hot_bwt_str[1] >> y_pp_) & 1);
+        const unsigned t2 = (unsigned)((one_hot_bwt_str[2] >> y_pp_) & 1);
+        const unsigned t3 = (unsigned)((one_hot_bwt_str[3] >> y_pp_) & 1);
+        if ((t0 | t1 | t2 | t3) == 0) {
+            // Sentinel ($) row (no bit-plane set, the scalar path's b == 4): its
+            // suffix-array value is 0 and we walked `offset` LF steps to reach it,
+            // so the SA entry is 0 + offset. drop_sentinel_offset (=> 0) reproduces
+            // bwa-mem2's dropped walk for --compat=bwa-mem2; the default keeps the
+            // accumulated offset, matching the scalar branch and the compressed
+            // sibling get_sa_entry_compressed.
+            sa_entry = drop_sentinel_offset ? 0 : offset;
+            return 1;
+        }
+        b = (uint8_t)(t0 ? 0 : t1 ? 1 : t2 ? 2 : 3);
+        const int64_t occ_sp = cp_occ[occ_id_pp_].cp_count[b] +
+            occ_popcount64(&one_hot_bwt_str[b], &one_hot_mask_array[sp & CP_MASK]);
+#else
         if((one_hot_bwt_str[0] >> y_pp_) & 1)
             b = 0;
         else if((one_hot_bwt_str[1] >> y_pp_) & 1)
@@ -2268,6 +2296,7 @@ int64_t FMI_search::call_one_step(int64_t pos, int64_t &sa_entry, int64_t &offse
         }
         
         GET_OCC(sp, b, occ_id_sp, y_sp, occ_sp, one_hot_bwt_str_c_sp, match_mask_sp);
+#endif
         
         sp = count[b] + occ_sp;
         
