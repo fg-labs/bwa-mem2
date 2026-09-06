@@ -4933,7 +4933,9 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
     int16_t *H_h    = H16_ + tid * SIMD_WIDTH16 * MAX_SEQ_LEN16;
     int16_t *H_v = H16__ + tid * SIMD_WIDTH16 * MAX_SEQ_LEN16;
 
-    int16_t i, j;
+    /* int, not int16_t: int16 loop counters cost a sign-extension per iteration
+     * on arm64 (sxth/sbfiz in the cell loop); values are bounded by nrow/ncol. */
+    int i, j;
 
     uint16_t tlen[SIMD_WIDTH16];
     uint16_t tail[SIMD_WIDTH16] __attribute((aligned(64)));
@@ -5044,8 +5046,10 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
             // __m128i cmp2 = _mm_cmpgt_epi16(pj128, tail128);
             __m128i cmp2 = _mm_cmpgt_epi16(j128, tail128);
             cmp1 = _mm_or_si128(cmp1, cmp2);
-            h128 = _mm_blendv_epi16(h128, zero128, cmp1);
-            f128 = _mm_blendv_epi16(f128, zero128, cmp1);
+            /* cmp1 is a full-width mask (OR of two cmpgt_epi16), so zeroing the
+             * out-of-band lanes is one andnot, not a three-op select. */
+            h128 = _mm_andnot_si128(cmp1, h128);
+            f128 = _mm_andnot_si128(cmp1, f128);
             
             _mm_store_si128((__m128i *)(F + l * SIMD_WIDTH16), f128);
             _mm_store_si128((__m128i *)(H_h + l * SIMD_WIDTH16), h128);
@@ -5121,8 +5125,8 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
             __m128i cmp1 = _mm_cmpgt_epi16(head128, pj128);
             __m128i cmp2 = _mm_cmpgt_epi16(pj128, tail128);
             cmp1 = _mm_or_si128(cmp1, cmp2);
-            h10 = _mm_blendv_epi16(h10, zero128, cmp1);
-            f21 = _mm_blendv_epi16(f21, zero128, cmp1);
+            h10 = _mm_andnot_si128(cmp1, h10);   /* full-width mask: andnot == select-zero */
+            f21 = _mm_andnot_si128(cmp1, f21);
             
             __m128i bmaxRS = maxRS1;
             maxRS1 =_mm_max_epi16(maxRS1, h11);
@@ -5164,7 +5168,7 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
         __m128i cmp1 = _mm_cmpgt_epi16(head128, j128);
         __m128i cmp2 = _mm_cmpgt_epi16(j128, tail128);
         cmp1 = _mm_or_si128(cmp1, cmp2);
-        h10 = _mm_blendv_epi16(h10, zero128, cmp1);
+        h10 = _mm_andnot_si128(cmp1, h10);
             
         _mm_store_si128((__m128i *)(H_h + j * SIMD_WIDTH16), h10);
         _mm_store_si128((__m128i *)(F + j * SIMD_WIDTH16), zero128);
