@@ -23,6 +23,12 @@
 extern "C" {
 #endif
 
+/* All three encoders require `dst` and `src` not to overlap: the NEON
+ * implementations finish with one full 16-byte vector on the last 16 output
+ * bytes (recomputing up to 15 already-written bytes from the corresponding
+ * inputs), which is only correct when the inputs are not being overwritten.
+ * Every caller encodes from the read's own seq/qual into a separate output
+ * buffer (kstring or BAM record scratch). */
 /* Encode `n` 2-bit-packed bases (ACGTN with N=4) from `src` into `n` ASCII
  * bytes in `dst` ('ACGTN'). Forward direction. */
 void sam_encode_seq_fwd(char *dst, const uint8_t *src, int n);

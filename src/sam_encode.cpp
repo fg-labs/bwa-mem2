@@ -57,7 +57,21 @@ void sam_encode_seq_fwd(char *dst, const uint8_t *src, int n) {
         vst1q_u8((uint8_t*)dst + i, out);
         i += 16;
     }
-    while (i < n) { dst[i] = "ACGTN"[SAM_NT_CLAMP4(src[i])]; ++i; }
+    if (i < n) {
+        if (n >= 16) {
+            /* Tail as one overlapped vector: the last 16 input bytes map to
+             * the last 16 output bytes, and the bytes recomputed under the
+             * overlap are the same pure function of the same inputs, so they
+             * are rewritten with identical values. Load and store both stay
+             * inside [0, n). */
+            uint8x16_t v   = vld1q_u8(src + n - 16);
+            uint8x16_t cl  = vminq_u8(v, four);
+            uint8x16_t out = vqtbl1q_u8(lut, cl);
+            vst1q_u8((uint8_t*)dst + n - 16, out);
+        } else {
+            while (i < n) { dst[i] = "ACGTN"[SAM_NT_CLAMP4(src[i])]; ++i; }
+        }
+    }
 }
 void sam_encode_seq_rev(char *dst, const uint8_t *src, int n) {
     const uint8x16_t lut = vld1q_u8(enc_rev_lut);
@@ -72,7 +86,20 @@ void sam_encode_seq_rev(char *dst, const uint8_t *src, int n) {
         vst1q_u8((uint8_t*)dst + i, out);
         i += 16;
     }
-    while (i < n) { dst[i] = "TGCAN"[SAM_NT_CLAMP4(src[n - 1 - i])]; ++i; }
+    if (i < n) {
+        if (n >= 16) {
+            /* Overlapped tail: the first 16 input bytes, reversed, are the
+             * last 16 output bytes (see sam_encode_seq_fwd). */
+            uint8x16_t v = vld1q_u8(src);
+            v = vextq_u8(v, v, 8);
+            v = vrev64q_u8(v);
+            uint8x16_t cl  = vminq_u8(v, four);
+            uint8x16_t out = vqtbl1q_u8(lut, cl);
+            vst1q_u8((uint8_t*)dst + n - 16, out);
+        } else {
+            while (i < n) { dst[i] = "TGCAN"[SAM_NT_CLAMP4(src[n - 1 - i])]; ++i; }
+        }
+    }
 }
 void sam_encode_qual_rev(char *dst, const char *src, int n) {
     int i = 0;
@@ -83,7 +110,17 @@ void sam_encode_qual_rev(char *dst, const char *src, int n) {
         vst1q_u8((uint8_t*)dst + i, v);
         i += 16;
     }
-    while (i < n) { dst[i] = src[n - 1 - i]; ++i; }
+    if (i < n) {
+        if (n >= 16) {
+            /* Overlapped tail (see sam_encode_seq_fwd). */
+            uint8x16_t v = vld1q_u8((const uint8_t*)src);
+            v = vextq_u8(v, v, 8);
+            v = vrev64q_u8(v);
+            vst1q_u8((uint8_t*)dst + n - 16, v);
+        } else {
+            while (i < n) { dst[i] = src[n - 1 - i]; ++i; }
+        }
+    }
 }
 #elif SAM_FAST_IMPL == 2
 /* SSSE3 16-byte: _mm_shuffle_epi8 LUT + _mm_min_epu8 clamp + reverse-mask
