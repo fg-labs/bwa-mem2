@@ -109,7 +109,7 @@ the other means suppressing:
 | default `@HD` | emitted | **suppressed** | emitted |
 | `.hdr`/`.dict` sidecar `@SQ` | honored | **ignored** | **ignored** |
 | `@PG` | `ID:bwa-mem3` | `ID:bwa-mem3` | `ID:bwa-mem3` |
-| all chains dropped by the weight filter (`-W`, `-x pacbio`/`pbref`/`ont2d`) | read aligned | read aligned | **read unmapped** |
+| all chains dropped by the weight filter (`-W`, `-x pacbio`/`pbref`/`ont2d`) | read unmapped | **read aligned** | read unmapped |
 
 Only **`HN:i`** and the sidecar are genuinely bwa-mem3 inventions, which is why
 both targets drop them. The rest is the fork point.
@@ -132,26 +132,35 @@ both targets drop them. The rest is the fork point.
 identical to `bwa-mem2` except for the `@PG` `ID`. If you are on bwa 0.7.17,
 `--compat=bwa-mem2` is the target you want.
 
-`--compat` is **output-shaping** — with two exceptions, it changes no alignment,
-no score, no flag, and no tag's value. It exists so pipelines validating
-bwa-mem3 against a bwa-mem2 golden can diff raw output without a
-post-processing step. The equivalence is a *versioned behavioral target*, not an
-unconditional byte-identity guarantee across hosts or SIMD tiers: each `--compat`
-value tracks a specific pinned upstream (see the bwa 0.7.19 pin above), and the
-raw diff holds for the same invocation on both binaries with `@PG` excluded, as
-the verification below shows.
+`--compat=<target>` reproduces its target's output — records and header alike,
+`@PG` excluded. Each of `bwa-mem` and `bwa-mem2` tracks a specific pinned
+upstream (see the bwa 0.7.19 pin above), and the raw diff holds for the same
+invocation on both binaries, as the verification below shows. `off` is
+bwa-mem3's own native output, not a pinned upstream. It exists so pipelines
+validating bwa-mem3 against an upstream golden can diff raw output without a
+post-processing step. The
+equivalence is a *versioned behavioral target*, not an unconditional
+byte-identity guarantee across hosts or SIMD tiers.
 
-The first exception is the last row above, and it exists because the rule and the
-purpose collide there. When the chain weight filter drops *every* chain for a
-read, bwa reports zero survivors and the read goes out unmapped, while
-bwa-mem2 hands back the chain it just rejected and aligns the read
+Almost all of that is output shaping: the two targets differ from each other, and
+from the default, only in tags and header. The exception is the records on which
+bwa and bwa-mem2 themselves emit different alignments. bwa-mem2 advertises output
+identical to bwa, and two such records are known — both places where its port is
+not faithful — so on each of them `--compat=bwa-mem` reproduces bwa,
+`--compat=bwa-mem2` reproduces bwa-mem2, and the default path takes bwa's answer,
+the principled one: without `--compat`, bwa-mem3 is bwa-mem2 plus bug fixes (see
+[Modes → Plain](../whats-different/modes.md)). A `--compat=bwa-mem2` that returned
+bwa's alignment there would not be a weaker guarantee, it would be a false one.
+
+The first is the last row above. When the chain weight filter drops *every*
+chain for a read, bwa reports zero survivors and the read goes out unmapped,
+while bwa-mem2's seqid-range bookkeeping rebuilds a count of one for the
+emptied array and aligns the read from the chain it just rejected
 ([#310](https://github.com/fg-labs/bwa-mem3/issues/310) for background;
-modeled here by [#374](https://github.com/fg-labs/bwa-mem3/pull/374)). Those are different
-alignments for the same input, so a target that declined to model the
-difference would reproduce neither upstream faithfully — and
-`--compat=bwa-mem` returning bwa-mem2's alignments is not a weaker guarantee,
-it is a false one. The default path keeps bwa-mem2's behavior, so the drop-in
-profile is unchanged.
+modeled per target by [#374](https://github.com/fg-labs/bwa-mem3/pull/374), the
+default fixed by [#489](https://github.com/fg-labs/bwa-mem3/pull/489)). The
+default and `--compat=bwa-mem` leave the read unmapped; `--compat=bwa-mem2`
+aligns it.
 
 This is reachable only when `min_chain_weight > 0`, which is never the default:
 `-W`, or the `-x pacbio`/`pbref`/`ont2d` presets. In practice `-x pacbio`
@@ -182,9 +191,10 @@ Notes and caveats:
   `CL:` embeds the invocation and its paths, so even two bwa-mem2 runs from
   different directories differ. Exclude `@PG` on both sides when comparing.
 - **Mutually exclusive with `--fast`.** Passing both is a hard error
-  (`--compat and --fast are mutually exclusive`), because `--fast` deliberately
-  *changes alignments* while `--compat` only shapes output — so `--fast
-  --compat=bwa-mem2` would produce a diff-clean-*looking* stream over genuinely
+  (`--compat and --fast are mutually exclusive`), because `--compat` asks for
+  parity with a pinned upstream while `--fast` deliberately *changes alignments*
+  away from both — so `--fast --compat=bwa-mem2` would produce a
+  diff-clean-*looking* stream over genuinely
   different alignments, defeating the parity-validation purpose. `--compat` is
   for the drop-in profile. (`--compat=off --fast` is fine: `off` selects no
   target.)
@@ -244,14 +254,15 @@ Notes and caveats:
   output](../whats-different/equivalence.md#byte-identical-output---compat),
   which is the single scope of record for both targets. Read it before treating
   either number as a general guarantee.
-- **Only one target can be byte-identical on a record where the upstreams
-  themselves disagree.** `--compat` shapes output and never moves an alignment,
-  so if bwa and bwa-mem2 ever emit different alignment fields for the same read,
-  bwa-mem3 matches at most one of them. No such record has been observed, and an
-  audit of bwa 0.7.17…0.7.19 finds no change to seeding, chaining, extension,
-  pairing, MAPQ or dedup — but the tail is not proven empty.
+- **Where the upstreams disagree, each target follows its own.** On a record
+  where bwa and bwa-mem2 emit different alignments, `--compat=bwa-mem` matches
+  bwa and `--compat=bwa-mem2` matches bwa-mem2; the two known records are the
+  ones described above. An audit of bwa 0.7.17…0.7.19 finds no change to
+  seeding, chaining, extension, pairing, MAPQ or dedup, so no further such
+  record is expected from that side — but the tail is not proven empty, and a
+  new one would be modeled the same way rather than left to one target.
 
-**The second exception is the suffix-array sentinel offset**
+**The second is the suffix-array sentinel offset**
 ([#469](https://github.com/fg-labs/bwa-mem3/pull/469)). bwa-mem2's pipelined SA
 lookup dropped the accumulated LF-walk offset when the walk reached the sentinel
 (`$`) row, reporting any hit within the first few bases of the *concatenated*

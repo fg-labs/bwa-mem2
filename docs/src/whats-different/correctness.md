@@ -378,6 +378,28 @@ standard fixtures do not exercise the `-` input. The direct-copy forward path (w
 
 ---
 
+## Upstream port divergences: all chains dropped by the weight filter (PR #489) and the SA sentinel offset (PR #469)
+
+bwa-mem2 advertises output identical to bwa. Two records are known where its port is not
+faithful, and on both the default path follows bwa; `--compat=bwa-mem2` reproduces bwa-mem2 as
+shipped, because parity with that release is its contract (see
+[Equivalence → Byte-identical output](equivalence.md#byte-identical-output---compat)).
+
+- **All chains dropped by the weight filter** ([#310](https://github.com/fg-labs/bwa-mem3/issues/310),
+  default fixed in [#489](https://github.com/fg-labs/bwa-mem3/pull/489)). With `-W` above zero or
+  an `-x pacbio`/`pbref`/`ont2d` preset, when the weight filter drops every chain for a read, bwa
+  reports zero survivors and the read goes out unmapped. bwa-mem2's seqid-range bookkeeping
+  rebuilds a count of one for the emptied array and extends the chain the filter just rejected —
+  whose seeds it has already freed, so what it extends depends on the allocator. Unreachable at
+  default settings, since `min_chain_weight` defaults to 0. Pinned by
+  `test/regression/chain_flt_empty_compat.sh`.
+- **Suffix-array sentinel offset** ([#469](https://github.com/fg-labs/bwa-mem3/pull/469)).
+  bwa-mem2's software-pipelined SA lookup drops the accumulated LF-walk offset when the walk
+  reaches the sentinel row, placing a hit within the first few bases of the concatenated reference
+  up to a few bases too far left; bwa's `bwt_sa` counts the walk. Latent on hg38 (which opens with
+  a long `N` run), reachable on small or custom references. Pinned by
+  `test/sa_lookup_sentinel_parity_test.cpp` and `test/regression/compat_sa_sentinel.sh`.
+
 ## Changes catalog
 
 | Item | bwa-mem3 PR | Upstream PR/issue | Status |
@@ -399,6 +421,8 @@ standard fixtures do not exercise the `-` input. The direct-copy forward path (w
 | Banded-SW `qlen` band-clamp reach slot overflow (`int32_t` reach) | [#468](https://github.com/fg-labs/bwa-mem3/pull/468) | — | fork-only (8-bit widening defensive; 16-bit divergence only at non-default `-A >= 3` long-query, `len2 * A > 65535` — default alignment records unchanged for fixed batch composition, see the correctness note above) |
 | kseq2bseq1 zero-initialization | [#22](https://github.com/fg-labs/bwa-mem3/pull/22) | — | fork-only |
 | Proper-pair flag from emitted alignment | [#17](https://github.com/fg-labs/bwa-mem3/pull/17) | — | fork-only, **opt-in** (`--proper-pair-from-emitted`; default matches both upstreams, [#362](https://github.com/fg-labs/bwa-mem3/issues/362)) |
+| All chains dropped by the weight filter: default follows bwa | [#489](https://github.com/fg-labs/bwa-mem3/pull/489) | — ([#310](https://github.com/fg-labs/bwa-mem3/issues/310)) | fork-only; `--compat=bwa-mem2` reproduces bwa-mem2 |
+| Suffix-array sentinel offset in the prefetch lookup | [#469](https://github.com/fg-labs/bwa-mem3/pull/469) | — | fork-only; `--compat=bwa-mem2` reproduces bwa-mem2 |
 
 ---
 

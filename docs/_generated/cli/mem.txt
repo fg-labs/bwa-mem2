@@ -58,25 +58,28 @@ Options:
                   differently from bwa-mem2, which the default reproduces).
                   NOT byte-identical to the default (divergence confined to the
                   low-confidence tail). Also implies --chunk-cap 256000000.
-    --compat STR  shape output to be byte-identical to another aligner.
-                  Targets: bwa-mem2 (alias mem2), bwa-mem, off
-                  Both targets drop the HN:i tag and ignore the <prefix>.hdr /
-                  <baseprefix>.dict sidecar, so @SQ is generated as bare SN/LN
-                  (+AH:* on ALT contigs). They differ where the upstreams do:
-                  bwa-mem2: also suppress MQ:i and the default @HD -- bwa-mem2
-                  v2.2.1 forked at bwa 0.7.17, before either landed.
-                  bwa-mem:  keep both -- bwa 0.7.18+ emits them. Pinned at 0.7.19.
-                  Shapes output only; changes no alignment. @PG still differs (it
-                  is run-specific) -- exclude it when comparing. Rejects any
-                  bwa-mem3-only lever that changes alignments/MAPQ (e.g. --smem-dedup,
-                  --adaptive-band, --max-extend-chains, --min-ext-len, --rescue-kmer,
-                  --seed-order); --fast and --meth are always refused, the rest can
-                  be forced with --compat-allow-divergent [off]
-    --compat-allow-divergent  with --compat, downgrade the divergent-lever refusal
-                  to a warning: keep the target's OUTPUT CONVENTIONS while running a
-                  bwa-mem3-only lever. Output is then NOT byte-identical to the
-                  target. Does not relax --fast/--meth (category errors, not
-                  divergences). No effect without --compat [off]
+    --compat STR  obtain backwards compatibility: shape output to be byte-identical
+                  to a reference aligner. Targets: bwa-mem2 (alias mem2), bwa-mem, off
+                  (bwa-mem = bwa 0.7.18+, pinned at 0.7.19; bwa-mem2 = v2.2.1.)
+                  Each target reproduces its upstream's exact records -- including the
+                  two records where bwa and bwa-mem2 themselves align differently -- by
+                  matching that upstream's SAM conventions: both drop the HN:i tag and
+                  ignore the <prefix>.hdr / <baseprefix>.dict sidecar, so @SQ is emitted
+                  as bare SN/LN (+AH:* on ALT contigs); bwa-mem2 additionally suppresses
+                  MQ:i and the default @HD (v2.2.1 forked at bwa 0.7.17, before either
+                  landed), while bwa-mem keeps both. Mostly shapes output, but
+                  --compat=bwa-mem2 also resurrects an all-chains-filtered alignment that
+                  the default and --compat=bwa-mem leave unmapped. @PG still differs
+                  (run-specific); exclude it when comparing.
+                  To stay byte-identical, --compat refuses bwa-mem3-only levers that
+                  change alignments/MAPQ (--smem-dedup, --adaptive-band, --max-extend-chains,
+                  --min-ext-len, --rescue-kmer, --seed-order); --fast and --meth are
+                  always refused. Override the forceable ones with --compat-allow-divergent.
+                  [off]
+    --compat-allow-divergent  downgrade that refusal to a warning: keep the target's
+                  output conventions while still running a bwa-mem3-only lever. Output is
+                  then NOT byte-identical to the target. Does not relax --fast/--meth
+                  (category errors, not divergences). No effect without --compat. [off]
 Scoring options:
    -A INT        score for a sequence match, which scales options -TdBOELU unless overridden [1]
    -B INT        penalty for a mismatch [4]

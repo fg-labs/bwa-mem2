@@ -10,17 +10,19 @@
  * the very fields this shapes -- bwa emits MQ:i and a default @HD, bwa-mem2
  * emits neither -- so "compat" is a choice among targets, not an on/off switch.
  *
- * Compat targets shape OUTPUT. Almost every field here is header or tag
- * shaping and changes no alignment, no score and no flag -- and that remains
- * the rule a new field should expect to follow.
+ * A compat target reproduces ITS upstream's output, records and header alike.
+ * Almost every field here is header or tag shaping and changes no alignment,
+ * no score and no flag -- and that remains what a new field should expect to
+ * be.
  *
- * The exceptions are `chain_flt_resurrect_empty` and `sa_sentinel_drop_offset`,
- * and they exist because the rule and the purpose collide: on those paths bwa
- * and bwa-mem2 emit DIFFERENT ALIGNMENTS for the same read, so a target that
- * refused to model them would reproduce neither faithfully. `--compat=bwa-mem`
- * that returns bwa-mem2's alignments is not a weaker guarantee, it is a false
- * one. A row therefore records whichever behavior ITS target has,
- * alignment-affecting or not.
+ * `chain_flt_resurrect_empty` and `sa_sentinel_drop_offset` are the two known
+ * records on which bwa and bwa-mem2 emit DIFFERENT ALIGNMENTS for the same
+ * read -- both places where bwa-mem2's port is not faithful to bwa -- so a
+ * row records whichever behavior ITS target has, alignment-affecting or not:
+ * a `--compat=bwa-mem2` that returned bwa's alignment there would not be a
+ * weaker guarantee, it would be a false one. The `off` row (no --compat) takes
+ * bwa's answer on both, the principled one: without --compat, bwa-mem3 is
+ * bwa-mem2 plus bug fixes.
  *
  * This does not license `--fast` or `--proper-pair-from-emitted` into a row:
  * those deviate from BOTH targets, so asking for target parity and for a
