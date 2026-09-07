@@ -159,13 +159,28 @@ typedef struct {
 			tmp = *l; *l = l[i]; l[i] = tmp; ks_heapadjust_##name(0, i, l); \
 		}																\
 	}																	\
+	/* bwa-mem3 local change (vs upstream klib): __ks_insertsort_##name below is \
+	 * rewritten from upstream's three-copy swap form into the hold-and-shift    \
+	 * form described here. The change is byte-identical (see the permutation    \
+	 * note below) and pinned by test/unit/test_ksort_permutation.cpp.           \
+	 * Insertion sort, hold-and-shift form: the moving element is held in `v`   \
+	 * and each displaced neighbour is copied once, instead of a three-copy     \
+	 * swap per step. The sequence of comparisons is exactly the classic       \
+	 * swap form's (the moving element against its left neighbour, stopping   \
+	 * at the same place), so the permutation -- which defines output on tied  \
+	 * keys under a partial-order comparator -- is unchanged. Pinned by        \
+	 * test/unit/test_ksort_permutation.cpp. */                                \
 	static inline void __ks_insertsort_##name(type_t *s, type_t *t)		\
 	{																	\
-		type_t *i, *j, swap_tmp;										\
-		for (i = s + 1; i < t; ++i)										\
-			for (j = i; j > s && __sort_lt(*j, *(j-1)); --j) {			\
-				swap_tmp = *j; *j = *(j-1); *(j-1) = swap_tmp;			\
+		type_t *i, *j, v;												\
+		for (i = s + 1; i < t; ++i) {									\
+			j = i;														\
+			if (__sort_lt(*j, *(j-1))) {								\
+				v = *j;													\
+				do { *j = *(j-1); --j; } while (j > s && __sort_lt(v, *(j-1))); \
+				*j = v;													\
 			}															\
+		}																\
 	}																	\
 	void ks_combsort_##name(size_t n, type_t a[])						\
 	{																	\
