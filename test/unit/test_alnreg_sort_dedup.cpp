@@ -282,6 +282,17 @@ extern void bwamem3_dedup_sort_by_score_exact(int n, mem_alnreg_t *a);
 extern void bwamem3_dedup_perm_sort_by_re(int n, mem_alnreg_t *a);
 extern void bwamem3_dedup_perm_sort_by_score(int n, mem_alnreg_t *a);
 
+// The incremental by-score sort the dedup-only (rescue) call sites use: an
+// insertion sort started from the survivors' input order, under a move budget,
+// with the same tie scan and introsort fallback as the permutation sort. Its
+// correctness claim is that the starting order affects time only, so it is
+// checked against the same oracle on rescue-shaped inputs AND on inputs that
+// violate the rescue invariant. The counters prove which path a fixture took.
+extern void bwamem3_dedup_incr_sort_by_score(int n, mem_alnreg_t *a, const uint32_t *idx, int n_in);
+extern void bwamem3_dedup_incremental_set(int on);
+extern void bwamem3_dedup_incr_stats(unsigned long *calls, unsigned long *budget_exhausted,
+                                     unsigned long *tie_fallback, unsigned long *moves, int reset);
+
 namespace {
 
 // Deterministic 64-bit LCG. std::rand would make the fixtures platform-defined.
@@ -464,4 +475,225 @@ TEST_CASE("the by-score permutation sort is byte-identical to unconditional ks_i
                      bwamem3_dedup_sort_by_score_exact, tied_by_score, &saw_tie));
     }
     CHECK(saw_tie);
+}
+
+namespace {
+
+// Insert `b` the way mem_matesw does (bwamem_pair.cpp): before the first record
+// with a strictly lower score, i.e. after any equal-score run, ignoring (rb, qb).
+void rescue_insert(std::vector<mem_alnreg_t> &a, const mem_alnreg_t &b) {
+    size_t i = 0;
+    while (i < a.size() && !(a[i].score < b.score)) ++i;
+    a.insert(a.begin() + static_cast<long>(i), b);
+}
+
+// A rescue-shaped input: `n_old` records in exact by-score order (as the
+// previous dedup call leaves them) plus `k` rescue-inserted records. Scores are
+// drawn from a small range so equal-score runs are long. Odd-numbered inserts
+// get an `rb` BELOW every old record, so rescue_insert -- which appends to the
+// end of the equal-score run regardless of rb -- leaves them (rb, qb)-misplaced
+// inside the run: the case the strict-chain check misses and the insertion sort
+// must fix. Even-numbered inserts get an `rb` above every old record and land
+// correctly, so both shapes are present.
+std::vector<mem_alnreg_t> rescue_shaped(Rng &rng, int n_old, int k) {
+    std::vector<mem_alnreg_t> a = random_regs(rng, n_old, 0);
+    bwamem3_dedup_sort_by_score_exact(static_cast<int>(a.size()), a.data());
+    std::vector<mem_alnreg_t> news = random_regs(rng, k, 0);
+    for (int i = 0; i < k; ++i) {
+        const int64_t shift = (i & 1) ? -100000 - 7 * i : 100000 + 7 * i;  // distinct (rb, qb) either way
+        news[i].rb += shift;
+        news[i].re += shift;
+        rescue_insert(a, news[i]);
+    }
+    return a;
+}
+
+// Drive the incremental sort on `in` with the identity index (input order ==
+// array order) and compare against the oracle, like agrees().
+bool incr_agrees(const std::vector<mem_alnreg_t> &in, bool *saw_tie) {
+    const int n = static_cast<int>(in.size());
+    std::vector<uint32_t> idx(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) idx[static_cast<size_t>(i)] = static_cast<uint32_t>(i);
+    std::vector<mem_alnreg_t> f(in), e(in);
+    bwamem3_dedup_incr_sort_by_score(n, f.data(), idx.data(), n);
+    bwamem3_dedup_sort_by_score_exact(n, e.data());
+    for (size_t i = 1; i < e.size(); ++i)
+        if (tied_by_score(e[i - 1], e[i])) { *saw_tie = true; break; }
+    return same_records(f, e);
+}
+
+// Same, but through a shuffled array with `idx` carrying the original position
+// and `n_in` larger than n (some input positions absent, as after a dedup that
+// excluded records): exercises the scatter rather than the identity mapping.
+bool incr_agrees_scattered(Rng &rng, const std::vector<mem_alnreg_t> &in, bool *saw_tie) {
+    const int n = static_cast<int>(in.size());
+    const int n_in = n + rng.in(0, 5);
+    // Input positions: n distinct values in [0, n_in), in increasing order so the
+    // scatter reproduces the array order of `in`.
+    std::vector<uint32_t> pos;
+    for (int i = 0; i < n_in; ++i) pos.push_back(static_cast<uint32_t>(i));
+    for (int i = n_in - 1; i > 0; --i) std::swap(pos[static_cast<size_t>(i)], pos[static_cast<size_t>(rng.in(0, i))]);
+    pos.resize(static_cast<size_t>(n));
+    std::sort(pos.begin(), pos.end());
+    // Shuffle the array; idx[i] is the input position of the shuffled a[i].
+    std::vector<int> perm;
+    for (int i = 0; i < n; ++i) perm.push_back(i);
+    for (int i = n - 1; i > 0; --i) std::swap(perm[static_cast<size_t>(i)], perm[static_cast<size_t>(rng.in(0, i))]);
+    std::vector<mem_alnreg_t> f;
+    std::vector<uint32_t> idx;
+    for (int i = 0; i < n; ++i) { f.push_back(in[static_cast<size_t>(perm[static_cast<size_t>(i)])]); idx.push_back(pos[static_cast<size_t>(perm[static_cast<size_t>(i)])]); }
+    // The oracle must see the same (shuffled) array: on a tie the fallback
+    // reproduces introsort's permutation of the ACTUAL input order, and only a
+    // tie-free result is independent of it.
+    std::vector<mem_alnreg_t> e(f);
+    bwamem3_dedup_incr_sort_by_score(n, f.data(), idx.data(), n_in);
+    bwamem3_dedup_sort_by_score_exact(n, e.data());
+    for (size_t i = 1; i < e.size(); ++i)
+        if (tied_by_score(e[i - 1], e[i])) { *saw_tie = true; break; }
+    return same_records(f, e);
+}
+
+}  // namespace
+
+TEST_CASE("the incremental by-score sort is byte-identical to ks_introsort on rescue-shaped input"
+          * doctest::test_suite("unit/alnreg_sort_dedup")) {
+    bwamem3_dedup_incr_stats(NULL, NULL, NULL, NULL, 1);
+    Rng rng(0x9e370005ULL);
+    bool saw_tie = false;
+    const int sizes[] = {9, 10, 16, 33, 64, 128, 300, 600};
+    for (int si = 0; si < 8; ++si)
+        for (int k = 1; k <= 8; ++k)
+            for (int t = 0; t < 12; ++t) {
+                CHECK(incr_agrees(rescue_shaped(rng, sizes[si], k), &saw_tie));
+                CHECK(incr_agrees_scattered(rng, rescue_shaped(rng, sizes[si], k), &saw_tie));
+            }
+    CHECK_FALSE(saw_tie);
+    unsigned long calls = 0, budget = 0, tie = 0, moves = 0;
+    bwamem3_dedup_incr_stats(&calls, &budget, &tie, &moves, 1);
+    CHECK(calls == 8UL * 8UL * 12UL * 2UL);
+    // Up to 4 inserts per rescue call is the production shape and must never
+    // exhaust the budget; the test goes to 8 to show the margin, still within it.
+    CHECK(budget == 0);
+    CHECK(tie == 0);
+    // The misplaced inserts really were moved: the fixtures with k >= 2 each
+    // carry at least one insert that has to travel to the front of its run.
+    CHECK(moves > 8UL * 8UL * 12UL);
+}
+
+TEST_CASE("the incremental by-score sort stays byte-identical when the rescue invariant is violated"
+          * doctest::test_suite("unit/alnreg_sort_dedup")) {
+    Rng rng(0x9e370006ULL);
+    bool saw_tie = false;
+    SUBCASE("random order (no useful starting order)") {
+        bwamem3_dedup_incr_stats(NULL, NULL, NULL, NULL, 1);
+        for (int t = 0; t < 150; ++t) {
+            CHECK(incr_agrees(random_regs(rng, 9 + t, 0), &saw_tie));
+            CHECK(incr_agrees_scattered(rng, random_regs(rng, 9 + t, 0), &saw_tie));
+        }
+        unsigned long budget = 0;
+        bwamem3_dedup_incr_stats(NULL, &budget, NULL, NULL, 1);
+        CHECK(budget > 0);   // the budget path ran and still agreed
+    }
+    SUBCASE("reverse by-score order (worst case for insertion sort)") {
+        bwamem3_dedup_incr_stats(NULL, NULL, NULL, NULL, 1);
+        for (int t = 0; t < 40; ++t) {
+            std::vector<mem_alnreg_t> a = random_regs(rng, 20 + 10 * t, 0);
+            bwamem3_dedup_sort_by_score_exact(static_cast<int>(a.size()), a.data());
+            std::reverse(a.begin(), a.end());
+            CHECK(incr_agrees(a, &saw_tie));
+        }
+        unsigned long budget = 0;
+        bwamem3_dedup_incr_stats(NULL, &budget, NULL, NULL, 1);
+        CHECK(budget > 0);
+    }
+    CHECK_FALSE(saw_tie);
+}
+
+TEST_CASE("the incremental by-score sort takes the introsort fallback on (score, rb, qb) ties"
+          * doctest::test_suite("unit/alnreg_sort_dedup")) {
+    bwamem3_dedup_incr_stats(NULL, NULL, NULL, NULL, 1);
+    Rng rng(0x9e370007ULL);
+    bool saw_tie = false;
+    for (int t = 0; t < 150; ++t) {
+        std::vector<mem_alnreg_t> in = rescue_shaped(rng, 9 + t, 3);
+        // As in the permutation-sort test: force full-key ties, keep the records
+        // distinguishable by memcmp so a wrong permutation is observable.
+        for (size_t i = 1; i < in.size(); i += 3) {
+            in[i] = in[i - 1];
+            in[i].seedcov = in[i - 1].seedcov + 1;
+        }
+        CHECK(incr_agrees(in, &saw_tie));
+        CHECK(incr_agrees_scattered(rng, in, &saw_tie));
+    }
+    CHECK(saw_tie);
+    unsigned long tie = 0;
+    bwamem3_dedup_incr_stats(NULL, NULL, &tie, NULL, 1);
+    CHECK(tie > 0);
+}
+
+TEST_CASE("mem_sort_dedup_patch on a rescue sequence is byte-identical with the incremental sort on and off"
+          * doctest::test_suite("unit/alnreg_sort_dedup")) {
+    // Emulate the rescue loop: dedup (dedup-only, bns == NULL), insert a few
+    // rescued regions at their score position, dedup again, several rounds --
+    // once with the incremental sort and once with today's permutation sort.
+    // The kill switch is a process global; restore it however this case exits
+    // (a failed REQUIRE throws), so no later case sees the path disabled.
+    struct RestoreIncremental { ~RestoreIncremental() { bwamem3_dedup_incremental_set(1); } } restore;
+    mem_opt_t *opt = mem_opt_init();
+    REQUIRE(opt->alnreg_sort_fast == 0);
+    Rng rng(0x9e370008ULL);
+    bwamem3_dedup_incr_stats(NULL, NULL, NULL, NULL, 1);
+    // Budget hits during the FIRST call of each fixture, whose input is in
+    // random order (in production that call is the extension-site one, which
+    // is not incremental); every later call must stay within budget.
+    unsigned long seed_budget = 0;
+    for (int t = 0; t < 60; ++t) {
+        const int n0 = 9 + 4 * t;
+        // Two identical runs from the same seed and fixture.
+        std::vector<mem_alnreg_t> seed = random_regs(rng, n0, (t % 3 == 0) ? 4 : 0);
+        std::vector<mem_alnreg_t> out[2];
+        for (int mode = 0; mode < 2; ++mode) {
+            bwamem3_dedup_incremental_set(mode);
+            Rng r2(0x1234ULL + static_cast<uint64_t>(t));
+            std::vector<mem_alnreg_t> a(seed);
+            for (int round = 0; round < 4; ++round) {
+                unsigned long b_before = 0, b_after = 0;
+                bwamem3_dedup_incr_stats(NULL, &b_before, NULL, NULL, 0);
+                int n = mem_sort_dedup_patch(opt, NULL, NULL, NULL,
+                                             static_cast<int>(a.size()), a.data(), NULL);
+                REQUIRE(n >= 0);
+                a.resize(static_cast<size_t>(n));
+                bwamem3_dedup_incr_stats(NULL, &b_after, NULL, NULL, 0);
+                if (round == 0) seed_budget += b_after - b_before;
+                const int k = r2.in(1, 4);
+                std::vector<mem_alnreg_t> news = random_regs(r2, k, 0);
+                for (int i = 0; i < k; ++i) {
+                    // Alternate above / below the old records (see rescue_shaped)
+                    // so some inserts land misplaced inside their score run.
+                    const int64_t shift = (i & 1) ? -(50000 * (round + 1) + 11 * i)
+                                                  : 50000 * (round + 1) + 11 * i;
+                    news[static_cast<size_t>(i)].rb += shift;
+                    news[static_cast<size_t>(i)].re += shift;
+                    rescue_insert(a, news[static_cast<size_t>(i)]);
+                }
+            }
+            int n = mem_sort_dedup_patch(opt, NULL, NULL, NULL,
+                                         static_cast<int>(a.size()), a.data(), NULL);
+            REQUIRE(n >= 0);
+            a.resize(static_cast<size_t>(n));
+            out[mode] = a;
+        }
+        CHECK(same_records(out[0], out[1]));
+    }
+    unsigned long calls = 0, budget = 0, moves = 0;
+    bwamem3_dedup_incr_stats(&calls, &budget, NULL, &moves, 1);
+    // The incremental path ran inside mem_sort_dedup_patch, its production idx
+    // plumbing (compaction, ping-pong) delivered the near-sorted starting order
+    // -- the budget never fired -- and the misplaced inserts were moved. A
+    // plumbing bug that left idx stale would still be byte-identical (the
+    // fallbacks guarantee that) but would show up here as budget > 0.
+    CHECK(calls > 0);
+    CHECK(budget == seed_budget);
+    CHECK(moves > 0);
+    free(opt);
 }
