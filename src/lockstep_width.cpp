@@ -9,6 +9,13 @@
 #include <errno.h>
 #include <mutex>
 
+#if defined(__linux__)
+#include <sched.h>   /* sched_getaffinity, CPU_* -- the effective-affinity core count */
+#endif
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+
 /* Runtime phase-2 lockstep width. Defaults to the compile-time floor so a
  * binary that never calls the startup probe is identical to the old constant. */
 int32_t g_smem_lockstep_n = SMEM_LOCKSTEP_N;
@@ -180,4 +187,205 @@ void bwa3_init_smem_lockstep_width(const void *base, int64_t n_blocks,
         /* else: g_smem_lockstep_n keeps its compile-time SMEM_LOCKSTEP_N init. */
     }
     });
+}
+
+/* ---- third-pass bwtseed lockstep: on/off policy (see lockstep_width.h) ----- */
+
+/* The compile-time platform default for the third-pass bwtseed lockstep, and the
+ * single place it is written down: arm64 has no SMT so keep it on, elsewhere the
+ * rule decides and this is the fallback (off). Used both to initialize
+ * g_bwtseed_lockstep and, in bwa3_init_bwtseed_lockstep, as the default_on fed to
+ * the resolver -- so a later unset run always falls back here, never to a leaked
+ * prior value. */
+#if defined(__aarch64__)
+#define BWA3_BWTSEED_LOCKSTEP_DEFAULT 1
+#else
+#define BWA3_BWTSEED_LOCKSTEP_DEFAULT 0
+#endif
+
+int32_t g_bwtseed_lockstep = BWA3_BWTSEED_LOCKSTEP_DEFAULT;
+
+/* Does the sysfs CPU list `list` ("0,4", "0-1", "0,4,8,12", ...) name any CPU the
+ * process may run on? A CPU c is allowed when c < allowed_len and allowed[c] != 0.
+ * With allowed == NULL every well-formed list is allowed (the host-wide count).
+ * Sets *ok = 0 on a malformed list so the caller can treat the whole count as
+ * unknown, mirroring the online-list parser's rigor. Copies `list` before
+ * tokenizing so the caller's buffer is left intact. */
+static int list_any_allowed(const char *list, const unsigned char *allowed,
+                            int32_t allowed_len, int *ok) {
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s", list);
+    int any = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(buf, ",\n", &save); tok != NULL; tok = strtok_r(NULL, ",\n", &save)) {
+        long lo, hi;
+        char *end = NULL;
+        lo = strtol(tok, &end, 10);
+        if (end == tok) { *ok = 0; return 0; }
+        if (*end == '-') {
+            char *he = NULL;
+            hi = strtol(end + 1, &he, 10);
+            if (he == end + 1) { *ok = 0; return 0; }
+            end = he;
+        } else {
+            hi = lo;
+        }
+        while (*end == ' ' || *end == '\t') end++;
+        if (*end != '\0') { *ok = 0; return 0; }
+        if (hi < lo || lo < 0) { *ok = 0; return 0; }
+        if (allowed == NULL) { any = 1; continue; }
+        for (long c = lo; c <= hi; c++)
+            if (c < (long) allowed_len && allowed[c]) any = 1;
+    }
+    return any;
+}
+
+int32_t bwa3_physical_core_count_masked_from(const char *cpu_root,
+                                             const unsigned char *allowed, int32_t allowed_len) {
+    /* Walk the online CPU list ("0-31", "0-7,16-23", ...); each physical core is
+     * counted once, at the leader of its thread_siblings_list (its lowest-numbered
+     * sibling). A core counts only when the process may run on at least one of its
+     * siblings -- so a cpuset/taskset restriction to a subset of the SMT threads
+     * counts the cores actually available, not the host's full set. allowed == NULL
+     * counts every online core (the host-wide count). A read or parse failure
+     * anywhere returns 0 (unknown) rather than a partial count. */
+    char path[256];
+    snprintf(path, sizeof(path), "%s/online", cpu_root);
+    FILE *fp = fopen(path, "r");
+    if (fp == NULL) return 0;
+    char online[8192];
+    if (fgets(online, sizeof(online), fp) == NULL) { fclose(fp); return 0; }
+    fclose(fp);
+    /* A list too long for the buffer would be counted short: treat as unknown. */
+    if (strchr(online, '\n') == NULL) return 0;
+
+    int32_t cores = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(online, ",\n", &save); tok != NULL; tok = strtok_r(NULL, ",\n", &save)) {
+        long lo, hi;
+        char *end = NULL;
+        lo = strtol(tok, &end, 10);
+        if (end == tok) return 0;
+        if (*end == '-') {
+            char *hi_end = NULL;
+            hi = strtol(end + 1, &hi_end, 10);
+            if (hi_end == end + 1) return 0;  /* a '-' with no numeric endpoint */
+            end = hi_end;
+        } else {
+            hi = lo;
+        }
+        /* Reject any trailing non-whitespace on the token or range endpoint: a
+         * value like "0x" or "0-1x" is malformed, so treat the whole list as
+         * unknown rather than silently counting its numeric prefix. strtok_r
+         * already split on ',' and '\n', so nothing but optional trailing
+         * whitespace may remain. Mirrors the *end != '\0' rigor of the env
+         * parsers above. */
+        while (*end == ' ' || *end == '\t') end++;
+        if (*end != '\0') return 0;
+        if (hi < lo || lo < 0) return 0;
+        for (long cpu = lo; cpu <= hi; cpu++) {
+            snprintf(path, sizeof(path), "%s/cpu%ld/topology/thread_siblings_list", cpu_root, cpu);
+            FILE *tp = fopen(path, "r");
+            if (tp == NULL) return 0;
+            char sib[512];
+            const char *got = fgets(sib, sizeof(sib), tp);
+            fclose(tp);
+            if (got == NULL) return 0;
+            char *e2 = NULL;
+            long leader = strtol(sib, &e2, 10);  /* first entry: lowest sibling */
+            if (e2 == sib) return 0;
+            if (leader != cpu) continue;   /* count each physical core once, at its leader */
+            int ok = 1;
+            const int any = list_any_allowed(sib, allowed, allowed_len, &ok);
+            if (!ok) return 0;
+            if (any) cores++;
+        }
+    }
+    return cores;
+}
+
+int32_t bwa3_physical_core_count_from(const char *cpu_root) {
+    /* Host-wide count: every online physical core (no affinity restriction). */
+    return bwa3_physical_core_count_masked_from(cpu_root, NULL, 0);
+}
+
+int32_t bwa3_physical_core_count(void) {
+#if defined(__APPLE__)
+    int32_t n = 0;
+    size_t size = sizeof(n);
+    if (sysctlbyname("hw.physicalcpu", &n, &size, NULL, 0) == 0 && n > 0) return n;
+    return 0;
+#elif defined(__linux__)
+    /* Count only the physical cores the process may actually run on. A cpuset or
+     * taskset restriction (containers, batch schedulers) can confine the workers
+     * to a subset of the host -- even to the SMT siblings of a single core -- and
+     * the lockstep rule must compare n_threads against that, not the host's full
+     * core count. Build an allowed[] from the effective affinity mask and pass it
+     * to the masked count. Whenever the effective affinity cannot be determined,
+     * return the unknown sentinel (0) rather than the host-wide count: reporting
+     * the host's full core count for a possibly-restricted process could enable
+     * lockstep when n_threads exceeds the process's available cores but not the
+     * host's. The rule already treats physical_cores <= 0 as "no basis to move"
+     * and keeps the platform default. */
+    static const char *const root = "/sys/devices/system/cpu";
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof(set), &set) != 0)
+        return 0;  /* affinity unknown: unknown topology, not the host-wide count */
+    unsigned char allowed[CPU_SETSIZE];
+    for (int i = 0; i < CPU_SETSIZE; i++) allowed[i] = CPU_ISSET(i, &set) ? 1 : 0;
+    /* masked == 0 means the sysfs read failed (unknown); a running process always
+     * has at least one allowed CPU, so it never legitimately means "no cores". Pass
+     * it through as the unknown sentinel rather than retrying host-wide. */
+    return bwa3_physical_core_count_masked_from(root, allowed, (int32_t) CPU_SETSIZE);
+#else
+    return 0;
+#endif
+}
+
+int32_t bwa3_bwtseed_lockstep_parse_env(const char *env) {
+    if (env == NULL || env[0] == '\0') return -1;  /* unset/empty: apply the rule */
+    if (strcmp(env, "0") == 0) return 0;
+    if (strcmp(env, "1") == 0) return 1;
+    return -2;                                     /* invalid: report, apply the rule */
+}
+
+int bwa3_bwtseed_lockstep_rule(int32_t n_threads, int32_t physical_cores, int default_on) {
+    if (physical_cores <= 0) return default_on;    /* unknown topology: no basis to move */
+    return n_threads <= physical_cores;
+}
+
+int bwa3_bwtseed_lockstep_resolve(int32_t pinned, int is_arm64, int32_t n_threads,
+                                  int32_t physical_cores, int default_on) {
+    if (pinned == 0 || pinned == 1) return pinned;   /* explicit pin, taken alone */
+    if (is_arm64) return default_on;                 /* no SMT: keep the compiled default, no rule */
+    return bwa3_bwtseed_lockstep_rule(n_threads, physical_cores, default_on);
+}
+
+int32_t bwa3_init_bwtseed_lockstep(int32_t n_threads) {
+    /* Resolve on every run, not once process-wide. A library caller can invoke
+     * main_mem more than once with different thread counts, and the third-pass
+     * driver dispatched in bwamem.cpp must reflect the current run's policy --
+     * not whichever thread count happened to come first. The sole caller runs
+     * this on the main thread before the seeding workers spawn, so the plain
+     * write to g_bwtseed_lockstep needs no synchronization. The first call still
+     * resolves from the compiled default, so single-run behavior is unchanged. */
+    const int32_t cores_used = bwa3_physical_core_count();  /* for the caller's log, pinned or not */
+    const char *env = getenv("BWA3_BWTSEED_LOCKSTEP");
+    const int32_t pinned = bwa3_bwtseed_lockstep_parse_env(env);
+    if (pinned == -2)
+        fprintf(stderr,
+                "ERROR: BWA3_BWTSEED_LOCKSTEP=\"%s\" is not 0 or 1; ignoring it "
+                "(resolving as if unset).\n", env);
+#if defined(__aarch64__)
+    const int is_arm64 = 1;
+#else
+    const int is_arm64 = 0;
+#endif
+    /* Feed the compile-time default -- never the mutable g_bwtseed_lockstep --
+     * so an earlier explicit pin (or unknown-topology resolution) does not leak
+     * into a later run whose environment is unset. */
+    g_bwtseed_lockstep = bwa3_bwtseed_lockstep_resolve(pinned, is_arm64, n_threads,
+                                                      cores_used, BWA3_BWTSEED_LOCKSTEP_DEFAULT);
+    return cores_used;
 }

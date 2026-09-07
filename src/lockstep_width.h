@@ -118,6 +118,94 @@ int32_t bwa3_measure_mlp(const void *base, int64_t n_blocks,
 void bwa3_init_smem_lockstep_width(const void *base, int64_t n_blocks,
                                    size_t stride, size_t word_off);
 
+
+/* ---- Third-pass bwtseed re-seeding lockstep: on/off policy -------------------
+ *
+ * FMI_search::bwtSeedStrategyAllPosOneThread_lockstep overlaps BWTSEED_LOCKSTEP_N
+ * reads' forward-extension walks so their cp_occ cache misses issue together.
+ * That hides memory latency the core would otherwise idle on -- which is only a
+ * win where nothing else hides it. On a non-SMT core (arm64: Graviton, Apple
+ * Silicon) it is a large seeding win at any thread count. On an SMT core the
+ * sibling hyperthread hides the same latency once both siblings are busy, and
+ * the lockstep's extra bookkeeping then shows up as wall time; below that
+ * point (threads <= physical cores, one thread per core) the sibling is idle
+ * and the lockstep wins as it does on arm64. Measured on x86 (5M-pair WGS,
+ * clang 19): -8 to -10% user CPU at -t = physical cores on both AMD Zen 3 and
+ * Intel Sapphire Rapids; at -t = 2x cores (both siblings busy) user CPU still
+ * falls ~7% but wall is bimodal on Zen 3, so the rule keeps it off there.
+ * Whole-aligner wall at -t = physical cores: -9.8% on both hosts (61.4 -> 55.3 s
+ * and 56.1 -> 50.6 s for the 5M-pair slice).
+ *
+ * Output is byte-identical either way (same SMEM emission order; the lockstep
+ * parity harness pins it) -- this is a scheduling choice, never a result one. */
+
+/* Runtime switch read by mem_collect_smem: nonzero selects the lockstep driver,
+ * zero the scalar one. Initialized to the pre-rule shipping default (on for
+ * arm64, off elsewhere) so a binary that never runs the resolver behaves as
+ * before. Read (not written) on the seeding hot path. */
+extern int32_t g_bwtseed_lockstep;
+
+/* Count the distinct physical cores the process may actually run on (Linux: one
+ * per thread_siblings_list leader under /sys/devices/system/cpu, intersected with
+ * the effective sched_getaffinity mask so a cpuset/taskset restriction to a subset
+ * of CPUs -- even to the SMT siblings of a single core -- counts only the cores
+ * available, not the host's full set; macOS: hw.physicalcpu). Returns 0 when the
+ * topology cannot be read, which the rule treats as "unknown": keep the platform
+ * default. */
+int32_t bwa3_physical_core_count(void);
+
+/* The sysfs parser behind the Linux branch, on an explicit cpu directory
+ * (`<cpu_root>/online`, `<cpu_root>/cpu<N>/topology/thread_siblings_list`).
+ * Counts the CPUs that lead their own sibling list, so each physical core is
+ * counted once whatever the list's spelling ("0,16" or "0-1"). Returns 0 on any
+ * read or parse failure, never a partial count. Exposed so the unit test can
+ * point it at a synthetic tree with a known answer; production calls go through
+ * bwa3_physical_core_count. */
+int32_t bwa3_physical_core_count_from(const char *cpu_root);
+
+/* As bwa3_physical_core_count_from, but a physical core counts only when at least
+ * one of its SMT siblings is allowed: CPU c is allowed when c < allowed_len and
+ * allowed[c] != 0. `allowed == NULL` counts every online core (identical to
+ * bwa3_physical_core_count_from). This is how bwa3_physical_core_count applies the
+ * affinity mask; exposed for the unit test to drive with a synthetic mask. */
+int32_t bwa3_physical_core_count_masked_from(const char *cpu_root,
+                                             const unsigned char *allowed, int32_t allowed_len);
+
+/* Classify a BWA3_BWTSEED_LOCKSTEP override (env may be NULL/empty) without
+ * touching global state:  1 = pin on, 0 = pin off, -1 = unset/empty (apply
+ * the rule), -2 = set but not "0"/"1" (invalid: the caller reports it and
+ * applies the rule). Pure, so it is unit-testable. */
+int32_t bwa3_bwtseed_lockstep_parse_env(const char *env);
+
+/* The rule itself, pure: enable when every worker thread gets its own physical
+ * core (n_threads <= physical_cores). An unknown topology (physical_cores <= 0)
+ * returns `default_on` unchanged -- there is no basis to move off the platform
+ * default. */
+int bwa3_bwtseed_lockstep_rule(int32_t n_threads, int32_t physical_cores, int default_on);
+
+/* The resolution order as one pure function (unit-tested), fed by the pieces
+ * above: `pinned` is bwa3_bwtseed_lockstep_parse_env's result (1 / 0 pin, -1
+ * unset, -2 invalid), `is_arm64` selects the platform that keeps its compiled
+ * default without consulting the rule (no SMT on any shipping arm64 host; the
+ * measured shipping state), `default_on` is that compiled default
+ * (BWA3_BWTSEED_LOCKSTEP_DEFAULT in lockstep_width.cpp, the single place it is
+ * written down; it also initializes g_bwtseed_lockstep).
+ *   1. a 0/1 pin is taken alone (gates / CI);
+ *   2. arm64 returns default_on;
+ *   3. otherwise bwa3_bwtseed_lockstep_rule(n_threads, physical_cores, default_on). */
+int bwa3_bwtseed_lockstep_resolve(int32_t pinned, int is_arm64, int32_t n_threads,
+                                  int32_t physical_cores, int default_on);
+
+/* Resolve and install g_bwtseed_lockstep, re-resolving on every call: reads the
+ * env pin, counts the host's physical cores, and applies
+ * bwa3_bwtseed_lockstep_resolve. Re-resolving (rather than caching the first
+ * decision) lets a library caller that runs main_mem repeatedly with different
+ * thread counts get the right policy each time. An invalid env value is reported
+ * (ERROR to stderr) and resolved as if unset. Returns the physical core count it
+ * read (0 = unknown) so the caller can log the decision. Call on the main thread
+ * before the seeding workers spawn. */
+int32_t bwa3_init_bwtseed_lockstep(int32_t n_threads);
+
 #ifdef __cplusplus
 }
 #endif
