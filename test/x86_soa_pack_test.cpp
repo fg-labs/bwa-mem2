@@ -1,9 +1,10 @@
-// x86_soa_pack byte-identity vs the scalar SoA fill it replaced.
+// x86_soa_pack / x86_soa_pack_u16 byte-identity vs the scalar SoA fills they replaced.
 //
-// The AVX2 / AVX-512BW 8-bit batch wrappers (kswv mate rescue, bandedSWA
-// extension) used to build their SoA input with one strided byte store per
-// base; src/x86_soa_pack.h builds the same layout with a tiled register
-// transpose. Its contract is "byte-for-byte what the scalar fill wrote",
+// The AVX2 / AVX-512BW 8-bit and 16-bit batch wrappers (kswv mate rescue,
+// bandedSWA extension) used to build their SoA input with one strided byte or
+// halfword store per base; src/x86_soa_pack.h builds the same layouts with a
+// tiled register transpose (x86_soa_pack for the 8-bit kernels, x86_soa_pack_u16
+// for the int16 kernels). The contract is "byte-for-byte what the scalar fill wrote",
 // including every pad row -- and the whole-aligner oracles cannot check that:
 // the tier-parity script compares two x86 tiers that both run this header, and
 // a SAM comparison is blind to pad bytes chosen so they never change an
@@ -11,10 +12,12 @@
 // it computes the scalar reference fill and asserts memcmp equality over the
 // FULL buffer, canary rows beyond nrows included.
 //
-// Built at -march=native, so W == 32 always runs on an AVX2 host and W == 64
-// runs when the host (and therefore the build) has AVX-512BW. On a host
-// without AVX2 (arm64, or an x86 build below the AVX2 tier) the header is
-// empty and the single case below records the skip.
+// Built at -march=native, so the AVX2 widths (8-bit W == 32, 16-bit W == 16)
+// always run on an AVX2 host and the AVX-512BW widths (8-bit W == 64, 16-bit
+// W == 32) run when the host (and therefore the build) has AVX-512BW; each
+// AVX-512BW case records a skip otherwise. On a host without AVX2 (arm64, or an
+// x86 build below the AVX2 tier) the header is empty and the single case below
+// records the skip.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
@@ -134,12 +137,14 @@ void run_trials(const Params &p, int trials, uint32_t seed) {
             size_t i = 0;
             while (i < bytes && got[i] == want[i]) i++;
             const int row = (int)(i / W), lane = (int)(i % W);
+            const int g = got[i], w = want[i];
+            free(got);   // FAIL unwinds the test case, so release the buffers first
+            free(want);
             FAIL(p.name << ": W=" << W << " trial " << t << " nrows=" << nrows
                         << " first mismatch row " << row << " lane " << lane
                         << " (len " << len[lane] << ", padStart " << padStart[lane]
-                        << "): got " << (int)got[i] << " want " << (int)want[i]);
+                        << "): got " << g << " want " << w);
         }
-        CHECK(same);
         free(got);
         free(want);
     }
@@ -166,6 +171,131 @@ TEST_CASE("x86_soa_pack<64> matches the scalar SoA fill byte for byte") {
 #else
 TEST_CASE("x86_soa_pack<64>: skipped, this build has no AVX-512BW") {
     MESSAGE("host/build lacks AVX-512BW; the 64-lane path is not instantiable here");
+    CHECK(true);
+}
+#endif
+
+// ---- 16-bit lanes: same oracle for x86_soa_pack_u16 (int16 kernels' SoA).
+namespace {
+
+void scalar_fill_u16(uint16_t *soa, int W, const std::vector<std::vector<uint8_t>> &seq,
+                     const std::vector<int> &len, const std::vector<int> &padStart, int nrows,
+                     uint16_t padA, uint16_t padB, uint16_t remapFrom, uint16_t remapTo) {
+    for (int j = 0; j < W; j++) {
+        for (int k = 0; k < nrows; k++) {
+            uint16_t v;
+            if (k < len[j]) {
+                v = seq[j][k];
+                if (v == remapFrom) v = remapTo;
+            } else {
+                v = (k < padStart[j]) ? padA : padB;
+            }
+            soa[(size_t)k * W + j] = v;
+        }
+    }
+}
+
+struct Params16 {
+    const char *name;
+    uint16_t padA, padB, remapFrom, remapTo;
+    bool padStartIsLen;
+    bool quantum8;  // rescue query: padStart = len rounded up to 8
+};
+
+// The four 16-bit wrapper calls (rescue ref/query, extension ref/query) plus
+// a pad byte equal to remapFrom.
+const Params16 kParams16[] = {
+    {"rescue16 reference (0xFFFF pad, N -> 15)", 0xFFFF, 0xFFFF, 4, 15, true, false},
+    {"rescue16 query (DUMMY3 to quantum, 0xFFFF after, N -> 16)", 26, 0xFFFF, 4, 16, false, true},
+    {"extension16 reference (DUMMY1 pad, N -> 0xFFFF)", 99, 99, 4, 0xFFFF, true, false},
+    {"extension16 query (DUMMY2 pad, N -> 0xFFFF)", 100, 100, 4, 0xFFFF, true, false},
+    {"pad value equal to remapFrom", 4, 4, 4, 15, false, false},
+};
+
+template <int W>
+void run_trials_u16(const Params16 &p, int trials, uint32_t seed) {
+    std::mt19937 rng(seed);
+    for (int t = 0; t < trials; t++) {
+        int nrows;
+        switch (t % 4) {
+            case 0: nrows = 8 * (int)(1 + rng() % 24); break;
+            case 1: nrows = 8 * (int)(1 + rng() % 24) + 1; break;
+            case 2: nrows = 1 + (int)(rng() % 12); break;
+            default: nrows = 1 + (int)(rng() % 400); break;
+        }
+        std::vector<std::vector<uint8_t>> seq(W);
+        std::vector<int> len(W), padStart(W);
+        std::vector<const uint8_t *> seqp(W);
+        const bool wideBytes = (t % 5 == 4);
+        for (int j = 0; j < W; j++) {
+            switch (rng() % 6) {
+                case 0: len[j] = 0; break;
+                case 1: len[j] = nrows - 1; break;
+                case 2: len[j] = std::min(nrows - 1, 8 * (int)(1 + rng() % 6)); break;
+                case 3: len[j] = std::min(nrows - 1, 8 * (int)(1 + rng() % 6) + 1); break;
+                default: len[j] = (int)(rng() % nrows); break;
+            }
+            if (p.padStartIsLen) padStart[j] = len[j];
+            else if (p.quantum8) padStart[j] = ((len[j] + 7) / 8) * 8;
+            else padStart[j] = len[j] + (int)(rng() % 20);
+            seq[j].resize(len[j]);
+            for (int k = 0; k < len[j]; k++) {
+                uint8_t b = wideBytes ? (uint8_t)(rng() % 256) : (uint8_t)(rng() % 5);
+                if (!wideBytes && rng() % 7 == 0) b = (uint8_t)p.remapFrom;
+                seq[j][k] = b;
+            }
+            seqp[j] = len[j] ? seq[j].data() : nullptr;
+        }
+        const size_t bytes = (size_t)(nrows + 2) * W * sizeof(uint16_t);
+        void *gotp = nullptr, *wantp = nullptr;
+        REQUIRE(posix_memalign(&gotp, 64, bytes) == 0);
+        REQUIRE(posix_memalign(&wantp, 64, bytes) == 0);
+        uint16_t *got = (uint16_t *)gotp, *want = (uint16_t *)wantp;
+        memset(got, 0xA5, bytes);
+        memset(want, 0xA5, bytes);
+        scalar_fill_u16(want, W, seq, len, padStart, nrows, p.padA, p.padB, p.remapFrom, p.remapTo);
+        x86_soa_pack_u16<W>(got, seqp.data(), len.data(), padStart.data(), nrows, p.padA, p.padB,
+                            p.remapFrom, p.remapTo);
+        const bool same = memcmp(got, want, bytes) == 0;
+        if (!same) {
+            size_t i = 0;
+            const size_t n = bytes / sizeof(uint16_t);
+            while (i < n && got[i] == want[i]) i++;
+            const int row = (int)(i / W), lane = (int)(i % W);
+            const int g = got[i], w = want[i];
+            free(got);   // FAIL unwinds the test case, so release the buffers first
+            free(want);
+            FAIL(p.name << ": W=" << W << " trial " << t << " nrows=" << nrows
+                        << " first mismatch row " << row << " lane " << lane
+                        << " (len " << len[lane] << ", padStart " << padStart[lane]
+                        << "): got " << g << " want " << w);
+        }
+        free(got);
+        free(want);
+    }
+}
+
+}  // namespace
+
+TEST_CASE("x86_soa_pack_u16<16> matches the scalar int16 SoA fill") {
+    uint32_t seed = 0x5eed1016u;
+    for (const Params16 &p : kParams16) {
+        CAPTURE(p.name);
+        run_trials_u16<16>(p, 300, seed++);
+    }
+}
+
+#if defined(__AVX512BW__)
+TEST_CASE("x86_soa_pack_u16<32> matches the scalar int16 SoA fill") {
+    uint32_t seed = 0x5eed1032u;
+    for (const Params16 &p : kParams16) {
+        CAPTURE(p.name);
+        run_trials_u16<32>(p, 300, seed++);
+    }
+}
+#else
+TEST_CASE("x86_soa_pack_u16<32>: skipped, this build has no AVX-512BW") {
+    MESSAGE("host/build lacks AVX-512BW; the 32-lane int16 path is not instantiable here");
     CHECK(true);
 }
 #endif

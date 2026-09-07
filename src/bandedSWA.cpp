@@ -1780,38 +1780,38 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
             bsize = w;
 
             uint64_t tim;
+            /* Gather the group's lane geometry once (with the reference and
+             * query prefetches), then build both int16 SoA buffers with the
+             * tiled transpose (x86_soa_pack_u16): reference bases (N -> 0xFFFF)
+             * then DUMMY1 through row maxLen1, query bases (N -> 0xFFFF)
+             * then DUMMY2 through column maxLen2. */
+            const uint8_t *seq1p[SIMD_WIDTH16], *seq2p[SIMD_WIDTH16];
+            int len1a[SIMD_WIDTH16], len2a[SIMD_WIDTH16];
             for(j = 0; j < SIMD_WIDTH16; j++)
             {
                 if ((i + j + PFD) < roundNumPairs) { // prefetch block (bounded; see getScores8/16 contract)
                     SeqPair spf = pairArray[i + j + PFD];
                     _mm_prefetch((const char*) seqBufRef + (int64_t)spf.idr, _MM_HINT_NTA);
                     _mm_prefetch((const char*) seqBufRef + (int64_t)spf.idr + 64, _MM_HINT_NTA);
+                    _mm_prefetch((const char*) seqBufQer + (int64_t)spf.idq, _MM_HINT_NTA);
+                    _mm_prefetch((const char*) seqBufQer + (int64_t)spf.idq + 64, _MM_HINT_NTA);
                 }
-
-                SeqPair sp = pairArray[i + j];
+                const SeqPair &sp = pairArray[i + j];
                 h0[j] = sp.h0;
-                seq1 = seqBufRef + (int64_t)sp.idr;
                 if (sp.len1 < 0 || sp.len1 >= MAX_SEQ_LEN16)
                     err_fatal(__func__, "bandedSWA: ref window length (len1) %d for pair %d is out of range [0, MAX_SEQ_LEN16=%d)", sp.len1, sp.id, MAX_SEQ_LEN16);
                 if (sp.len2 < 0 || sp.len2 >= MAX_SEQ_LEN16)
                     err_fatal(__func__, "bandedSWA: query length (len2) %d for pair %d is out of range [0, MAX_SEQ_LEN16=%d)", sp.len2, sp.id, MAX_SEQ_LEN16);
-                
-                for(k = 0; k < sp.len1; k++)
-                {
-                    mySeq1SoA[k * SIMD_WIDTH16 + j] = (seq1[k] == AMBIG?0xFFFF:seq1[k]);
-                }
+                seq1p[j] = seqBufRef + (int64_t)sp.idr;
+                seq2p[j] = seqBufQer + (int64_t)sp.idq;
+                len1a[j] = sp.len1;
+                len2a[j] = sp.len2;
                 qlen_scaled[j] = sp.len2 * max;
                 if(maxLen1 < sp.len1) maxLen1 = sp.len1;
+                if(maxLen2 < sp.len2) maxLen2 = sp.len2;
             }
-
-            for(j = 0; j < SIMD_WIDTH16; j++)
-            {
-                SeqPair sp = pairArray[i + j];
-                for(k = sp.len1; k <= maxLen1; k++) //removed "="
-                {
-                    mySeq1SoA[k * SIMD_WIDTH16 + j] = DUMMY1;
-                }
-            }
+            x86_soa_pack_u16<SIMD_WIDTH16>(mySeq1SoA, seq1p, len1a, len1a, maxLen1 + 1, DUMMY1, DUMMY1, AMBIG, 0xFFFF);
+            x86_soa_pack_u16<SIMD_WIDTH16>(mySeq2SoA, seq2p, len2a, len2a, maxLen2 + 1, DUMMY2, DUMMY2, AMBIG, 0xFFFF);
             /* B5: only the boundary row H2[maxLen1] survives the h0-prefix
              * deletion seed below; write just that row, before the seed. */
             _mm256_store_si256((__m256i *)(H2 + maxLen1 * SIMD_WIDTH16), _mm256_set1_epi16((short)DUMMY1));
@@ -1826,32 +1826,6 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
                 _mm256_store_si256((__m256i *)(H2 + k* SIMD_WIDTH16), tmp256_);
             }
 //-------------------
-            for(j = 0; j < SIMD_WIDTH16; j++)
-            {
-                if ((i + j + PFD) < roundNumPairs) { // prefetch block (bounded; see getScores8/16 contract)
-                    SeqPair spf = pairArray[i + j + PFD];
-                    _mm_prefetch((const char*) seqBufQer + (int64_t)spf.idq, _MM_HINT_NTA);
-                    _mm_prefetch((const char*) seqBufQer + (int64_t)spf.idq + 64, _MM_HINT_NTA);
-                }
-                
-                SeqPair sp = pairArray[i + j];
-                //seq2 = seqBufQer + (int64_t)sp.id * MAX_SEQ_LEN_QER;
-                seq2 = seqBufQer + (int64_t)sp.idq;             
-                for(k = 0; k < sp.len2; k++)
-                {
-                    mySeq2SoA[k * SIMD_WIDTH16 + j] = (seq2[k]==AMBIG?0xFFFF:seq2[k]);
-                }
-                if(maxLen2 < sp.len2) maxLen2 = sp.len2;
-            }
-            
-            for(j = 0; j < SIMD_WIDTH16; j++)
-            {
-                SeqPair sp = pairArray[i + j];
-                for(k = sp.len2; k <= maxLen2; k++)
-                {
-                    mySeq2SoA[k * SIMD_WIDTH16 + j] = DUMMY2;
-                }
-            }
             /* B5: only boundary row H1[maxLen2]=0 survives the seed below. */
             _mm256_store_si256((__m256i *)(H1 + maxLen2 * SIMD_WIDTH16), _mm256_setzero_si256());
 //------------------------
@@ -3694,39 +3668,38 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
             uint16_t maxLen2 = 0;
             bsize = w;
 
+            /* Gather the group's lane geometry once (with the reference and
+             * query prefetches), then build both int16 SoA buffers with the
+             * tiled transpose (x86_soa_pack_u16): reference bases (N -> ambRef)
+             * then DUMMY1 through row maxLen1, query bases (N -> ambQer)
+             * then DUMMY2 through column maxLen2. */
+            const uint8_t *seq1p[SIMD_WIDTH16], *seq2p[SIMD_WIDTH16];
+            int len1a[SIMD_WIDTH16], len2a[SIMD_WIDTH16];
             for(j = 0; j < SIMD_WIDTH16; j++)
             {
                 if ((i + j + PFD16) < roundNumPairs) { // prefetch block (bounded; see getScores8/16 contract)
                     SeqPair spf = pairArray[i + j + PFD16];
                     _mm_prefetch((const char*) seqBufRef + (int64_t)spf.idr, _MM_HINT_NTA);
                     _mm_prefetch((const char*) seqBufRef + (int64_t)spf.idr + 64, _MM_HINT_NTA);
+                    _mm_prefetch((const char*) seqBufQer + (int64_t)spf.idq, _MM_HINT_NTA);
+                    _mm_prefetch((const char*) seqBufQer + (int64_t)spf.idq + 64, _MM_HINT_NTA);
                 }
-                SeqPair sp = pairArray[i + j];
+                const SeqPair &sp = pairArray[i + j];
                 h0[j] = sp.h0;
-
-                seq1 = seqBufRef + (int64_t)sp.idr;
                 if (sp.len1 < 0 || sp.len1 >= MAX_SEQ_LEN16)
                     err_fatal(__func__, "bandedSWA: ref window length (len1) %d for pair %d is out of range [0, MAX_SEQ_LEN16=%d)", sp.len1, sp.id, MAX_SEQ_LEN16);
                 if (sp.len2 < 0 || sp.len2 >= MAX_SEQ_LEN16)
                     err_fatal(__func__, "bandedSWA: query length (len2) %d for pair %d is out of range [0, MAX_SEQ_LEN16=%d)", sp.len2, sp.id, MAX_SEQ_LEN16);
-
-                for(k = 0; k < sp.len1; k++)
-                {
-                    mySeq1SoA[k * SIMD_WIDTH16 + j] = (seq1[k] == AMBIG ? ambRef : seq1[k]);
-                }
-                
+                seq1p[j] = seqBufRef + (int64_t)sp.idr;
+                seq2p[j] = seqBufQer + (int64_t)sp.idq;
+                len1a[j] = sp.len1;
+                len2a[j] = sp.len2;
                 qlen_scaled[j] = sp.len2 * max;
                 if(maxLen1 < sp.len1) maxLen1 = sp.len1;
+                if(maxLen2 < sp.len2) maxLen2 = sp.len2;
             }
-
-            for(j = 0; j < SIMD_WIDTH16; j++)
-            {
-                SeqPair sp = pairArray[i + j];
-                for(k = sp.len1; k <= maxLen1; k++)
-                {
-                    mySeq1SoA[k * SIMD_WIDTH16 + j] = DUMMY1;
-                }
-            }
+            x86_soa_pack_u16<SIMD_WIDTH16>(mySeq1SoA, seq1p, len1a, len1a, maxLen1 + 1, DUMMY1, DUMMY1, AMBIG, ambRef);
+            x86_soa_pack_u16<SIMD_WIDTH16>(mySeq2SoA, seq2p, len2a, len2a, maxLen2 + 1, DUMMY2, DUMMY2, AMBIG, ambQer);
             /* B5: only boundary row H2[maxLen1] survives the seed below. */
             _mm512_store_si512((__m512i *)(H2 + maxLen1 * SIMD_WIDTH16), _mm512_set1_epi16((short)DUMMY1));
 //--------------------
@@ -3741,31 +3714,6 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
                 _mm512_store_si512((__m512i *)(H2 + k* SIMD_WIDTH16), tmp512_);
             }
 //-------------------
-            for(j = 0; j < SIMD_WIDTH16; j++)
-            {
-                if ((i + j + PFD16) < roundNumPairs) { // prefetch block (bounded; see getScores8/16 contract)
-                    SeqPair spf = pairArray[i + j + PFD16];
-                    _mm_prefetch((const char*) seqBufQer + (int64_t)spf.idq, _MM_HINT_NTA);
-                    _mm_prefetch((const char*) seqBufQer + (int64_t)spf.idq + 64, _MM_HINT_NTA);
-                }
-                
-                SeqPair sp = pairArray[i + j];
-                seq2 = seqBufQer + (int64_t)sp.idq;
-                for(k = 0; k < sp.len2; k++)
-                {
-                    mySeq2SoA[k * SIMD_WIDTH16 + j] = (seq2[k]==AMBIG? ambQer : seq2[k]);
-                }
-                if(maxLen2 < sp.len2) maxLen2 = sp.len2;
-            }
-            
-            for(j = 0; j < SIMD_WIDTH16; j++)
-            {
-                SeqPair sp = pairArray[i + j];
-                for(k = sp.len2; k <= maxLen2; k++)
-                {
-                    mySeq2SoA[k * SIMD_WIDTH16 + j] = DUMMY2;
-                }
-            }
             /* B5: only boundary row H1[maxLen2]=0 survives the seed below. */
             _mm512_store_si512((__m512i *)(H1 + maxLen2 * SIMD_WIDTH16), _mm512_setzero_si512());
 //------------------------
