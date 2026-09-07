@@ -47,7 +47,8 @@ static std::string write_tmp(const std::vector<std::string> &lines)
 
 static void run_case(const char *name,
                      const std::vector<std::string> &lines,
-                     const char *seed_hdr)
+                     const char *seed_hdr,
+                     const char *expected_literal = nullptr)
 {
     std::string path = write_tmp(lines);
 
@@ -62,6 +63,19 @@ static void run_case(const char *name,
     actual = bwa_insert_header_file(fp, actual);
     fclose(fp);
     unlink(path.c_str());
+
+    // Independent oracle: when the caller supplies the exact expected output,
+    // assert the batched path against that literal, not only against the
+    // per-line baseline. Both paths run bwa_escape, so a self-consistency check
+    // alone can pass against a shared escaping bug (e.g. lone-backslash
+    // handling); the literal pins the true result.
+    if (expected_literal != nullptr) {
+        if (actual == nullptr || strcmp(actual, expected_literal) != 0) {
+            fprintf(stderr, "FAIL: %s: literal oracle mismatch\n  expected: %s\n  actual:   %s\n",
+                    name, expected_literal, actual ? actual : "(null)");
+            exit(1);
+        }
+    }
 
     // Both null is a valid outcome (empty / no-@ file, no seed).
     if (expected == nullptr && actual == nullptr) {
@@ -126,10 +140,15 @@ int main(int, char **)
     // per-line baseline never has this failure mode: it escapes and joins one
     // line at a time, so bwa_escape never sees a separator it didn't itself
     // just insert as the previous call's boundary.
+    // Independent oracle: bwa_escape drops a lone trailing backslash, so the
+    // retained @CO line loses its final '\' and the two records join with a
+    // single '\n' -- pinned literally so a shared escaping bug can't hide behind
+    // the baseline (which runs the same bwa_escape).
     run_case("trailing-backslash-then-at-line",
              {"@CO\tfield\\\n",
               "@SQ\tSN:chr1\tLN:1000\n"},
-             nullptr);
+             nullptr,
+             "@CO\tfield\n@SQ\tSN:chr1\tLN:1000");
 
     // Case 5: empty file — calloc(1, 0) edge case. Must leave hdr unchanged
     // (null in / null out).
@@ -153,6 +172,33 @@ int main(int, char **)
              {"@HD\tVN:1.6\n",
               "@SQ\tSN:chr1\tLN:1000"},
              nullptr);
+
+    // The fgets budget is sizeof(chunk)-1; a line filling the buffer exactly is AT
+    // the budget, not over it, and must be accepted. Such a line fills `chunk`
+    // without a trailing newline, but feof() is not yet set, so the naive
+    // fill-and-reject check used to reject a line that was exactly at the limit.
+    const size_t kBudget = 0x10000 - 1;  // must match `char chunk[0x10000]` in bwa.cpp
+
+    // Case 8b: an @-line whose content is EXACTLY the budget with no trailing
+    // newline at end-of-file. Baseline (per-line bwa_insert_header) accepts it;
+    // the batched path must too rather than rejecting a line at the limit.
+    {
+        std::string at_budget = "@CO\t";
+        at_budget.append(kBudget - at_budget.size(), 'x');  // total length == kBudget
+        assert(at_budget.size() == kBudget);
+        run_case("at-budget-no-newline", {at_budget}, nullptr);
+    }
+
+    // Case 8c: the same at-budget line but properly terminated by a newline (and
+    // followed by end-of-file). fgets still returns the content chunk full and
+    // newline-less, deferring the '\n' to the next read -- which carries no further
+    // line content, so the line is accepted.
+    {
+        std::string at_budget = "@CO\t";
+        at_budget.append(kBudget - at_budget.size(), 'x');
+        assert(at_budget.size() == kBudget);
+        run_case("at-budget-with-newline", {at_budget + "\n"}, nullptr);
+    }
 
     // Case 9: a single @-line longer than the 64 KiB fgets budget. The pre-
     // patch loop asserted on buf[i-1] == '\n' and aborted; the batched path
@@ -190,6 +236,56 @@ int main(int, char **)
             exit(1);
         }
         fprintf(stderr, "OK:   oversize-line\n");
+    }
+
+    // Case 9b: an @-line exactly ONE byte over the budget with no trailing
+    // newline. This pins the boundary: the first chunk fills the buffer, the next
+    // read yields a single further content byte, and the batched path must reject.
+    // We fork because bwa_insert_header_file calls err_fatal -> exit(EXIT_FAILURE).
+    {
+        std::string over = "@CO\t";
+        over.append((0x10000 - 1) + 1 - over.size(), 'x');  // total length == kBudget + 1
+        assert(over.size() == (size_t)(0x10000 - 1) + 1);
+        std::string path = write_tmp({over});
+        pid_t pid = fork();
+        assert(pid >= 0);
+        if (pid == 0) {
+            FILE *devnull = freopen("/dev/null", "w", stderr);
+            (void) devnull;
+            FILE *fp = fopen(path.c_str(), "r");
+            assert(fp != nullptr);
+            char *out = bwa_insert_header_file(fp, nullptr);
+            (void) out;  // Should not return -- err_fatal must exit first.
+            fclose(fp);
+            _exit(0);
+        }
+        int status = 0;
+        waitpid(pid, &status, 0);
+        unlink(path.c_str());
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != EXIT_FAILURE) {
+            fprintf(stderr,
+                    "FAIL: over-budget-by-one: expected exit(EXIT_FAILURE), got "
+                    "exited=%d status=%d signaled=%d signal=%d\n",
+                    WIFEXITED(status), WEXITSTATUS(status),
+                    WIFSIGNALED(status), WTERMSIG(status));
+            exit(1);
+        }
+        fprintf(stderr, "OK:   over-budget-by-one\n");
+    }
+
+    // Case 9c: a NON-@ line far longer than the budget. Non-header lines are
+    // dropped regardless of length, so this must NOT abort -- only a kept
+    // (@-prefixed) line over budget is fatal (Case 9/9b). With a following @-line
+    // the dropped over-budget line leaves only the @SQ record. This runs inline
+    // (no fork): a regression that re-fatals on the non-@ line would exit(1) here.
+    {
+        std::string long_non_header;
+        long_non_header.append(70000, 'x');  // no '@' prefix, well over the 64 KiB budget
+        long_non_header.push_back('\n');
+        run_case("long-non-header-dropped",
+                 {long_non_header, "@SQ\tSN:chr1\tLN:1000\n"},
+                 nullptr,
+                 "@SQ\tSN:chr1\tLN:1000");
     }
 
     // Case 10: a NON-SEEKABLE stream (pipe). ftell() returns -1 on a pipe, so

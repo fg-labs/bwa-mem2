@@ -1140,12 +1140,18 @@ err_set_rg:
 // that order matters). `*start` receives the offset of the freshly-appended
 // segment within the returned buffer, mirroring the accounting bwa_escape
 // needs; pass NULL when the caller has no further use for it.
-static char *bwa_join_header(const char *s, char *hdr, int *start)
+static char *bwa_join_header(const char *s, char *hdr, size_t *start)
 {
-    int len = 0;
+    size_t len = 0;
     if (hdr) {
         len = strlen(hdr);
-        int len_s = strlen(s);
+        size_t len_s = strlen(s);
+        // strlen returns size_t; computing the allocation in int (as before) let
+        // an aggregate -H payload above INT_MAX wrap to an undersized realloc and
+        // a strcpy past the allocation. Keep the arithmetic in size_t and reject
+        // the (pathological) case where len + len_s + 2 would itself overflow.
+        if (len > (size_t)-1 - 2 || len_s > (size_t)-1 - 2 - len)
+            err_fatal(__func__, "header too large to join");
         char *tmp = (char*) realloc(hdr, len + len_s + 2);
         xassert(tmp != NULL, "out of memory: hdr");  // don't leak/dangle hdr on failure
         hdr = tmp;
@@ -1160,7 +1166,7 @@ static char *bwa_join_header(const char *s, char *hdr, int *start)
 char *bwa_insert_header(const char *s, char *hdr)
 {
     if (s == 0 || s[0] != '@') return hdr;
-    int start = 0;
+    size_t start = 0;
     hdr = bwa_join_header(s, hdr, &start);
     bwa_escape(hdr + start);  // bwa_escape derefs hdr; bwa_join_header already xassert'd it
     return hdr;
@@ -1180,10 +1186,12 @@ char *bwa_insert_header_file(FILE *fp, char *hdr)
     // silently discarded the entire -H file. Every realloc is xassert'd so an
     // OOM fails with a diagnostic rather than a NULL write (a raw kstring append
     // would not check). fgets reads at most sizeof(chunk)-1 bytes; a chunk that
-    // fills to that bound without a newline while more input remains is a single
-    // header line longer than the budget -- rejected (matching the prior
-    // contract), and keyed on the filled-budget condition rather than a running
-    // byte count so it no longer false-fires on a short unterminated final line.
+    // fills to that bound without a newline means the line has reached the budget.
+    // Whether it *exceeds* the budget is decided on the next chunk (see budget_full
+    // below): a line that stops exactly at the budget -- terminated by a newline or
+    // by end-of-file -- is accepted; only a line that continues past a full buffer is
+    // rejected. Keying on the filled-buffer condition (not a running byte count) means
+    // a short unterminated final line never false-fires.
     //
     // Semantics match the old loop: non-@ lines are dropped; kept @-lines are
     // joined by '\n' with no trailing newline.
@@ -1209,11 +1217,29 @@ char *bwa_insert_header_file(FILE *fp, char *hdr)
     int at_line_start = 1;    // is the next fgets result the start of a new line?
     int keep = 0;             // are we inside an @-line being kept?
     size_t line_start = 0;    // offset in buf where the current line's raw content begins
+    int budget_full = 0;      // the previous chunk filled the buffer without a newline, so the
+                              // current line has reached the budget exactly; it only overflows
+                              // if the next chunk continues it with further content.
     while (fgets(chunk, sizeof chunk, fp) != NULL) {
         int clen = (int) strlen(chunk);
         int has_nl = (clen > 0 && chunk[clen - 1] == '\n');
-        if (!has_nl && clen == (int)(sizeof chunk) - 1 && !feof(fp))
-            err_fatal(__func__, "header line exceeds %d-byte budget", (int)(sizeof chunk) - 1);
+        // A line that filled the buffer last chunk (budget_full) sits exactly at the
+        // budget. Only reject it now, once this chunk proves it continues with real
+        // content; a chunk that is just the terminating '\n' (or an end-of-file that
+        // ends the loop before we get here) leaves the line at the limit and accepted.
+        // feof() can't make this call at fill time -- it isn't set until a later read
+        // hits EOF, which would falsely reject a final at-budget line.
+        // Only a kept (@-prefixed) line is subject to the budget: non-@ lines are
+        // dropped regardless of length, so an oversized non-header line must not
+        // abort the command. `keep` is decided at each line's first chunk and is
+        // stable here -- budget_full can only be set mid-line (the prior chunk had
+        // no newline), so this iteration never re-decides it.
+        if (budget_full && keep) {
+            int cont = has_nl ? clen - 1 : clen;   // content this chunk adds to the same line
+            if (cont > 0)
+                err_fatal(__func__, "header line exceeds %d-byte budget", (int)(sizeof chunk) - 1);
+        }
+        budget_full = (!has_nl && clen == (int)(sizeof chunk) - 1);
         if (at_line_start) keep = (chunk[0] == '@');  // decide once, at the line's first chunk
         if (keep) {
             int add = has_nl ? clen - 1 : clen;         // content without the trailing '\n'
@@ -1238,6 +1264,11 @@ char *bwa_insert_header_file(FILE *fp, char *hdr)
         }
         at_line_start = has_nl;  // a continuation chunk (no newline yet) is not a new line
     }
+    // fgets returns NULL for both EOF and a read error. A read error must fail
+    // loudly rather than silently accept a partial retained line as if the
+    // stream had ended cleanly -- check ferror before the EOF finalization.
+    if (ferror(fp))
+        err_fatal(__func__, "error reading -H header stream");
     if (keep && !at_line_start) {
         // The file ended without a trailing newline on the last retained
         // line, so the has_nl branch above never got to escape it.
