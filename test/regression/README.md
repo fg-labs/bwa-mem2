@@ -1,7 +1,7 @@
 # Regression scripts
 
-End-to-end parity and invariant checks. `chr22_parity.sh` and
-`version_banner.sh` run on every matrix row; the rest run on the canonical
+End-to-end parity and invariant checks. `chr22_parity.sh`,
+`version_banner.sh` and `arg_range_validation.sh` run on every matrix row; the rest run on the canonical
 `Linux x86_64 AVX2 (mimalloc)` row only, except for the ones wired to a job of
 their own: `profile_slice_cpu.sh` runs from `profiling-build` (see below), and
 the `ndebug_gate_lint*`, `debug_macro_flag_lint*`, `shell_lint*`,
@@ -65,6 +65,7 @@ parity or byte-identity, so nothing here scopes it.)
 | `regression_coverage_lint_selftest.sh` | the lint above still detects an unrun script, so its `PASS` means something | "Coverage lint still detects an unrun script"       |
 | `host_floor_enforce.sh`      | below-floor hosts get exit 2 + a readable error, not a SIGILL (needs `TESTING_BUILD=1`) | "SIMD floor enforcement (TESTING_BUILD, injected below-floor tier)" |
 | `version_banner.sh`          | `bwa-mem3 version` prints the SIMD floor and runtime tier lines        | "Version banner regression"                         |
+| `arg_range_validation.sh`    | `-E` (`0`, `5,0`, and out-of-range tokens that would narrow to a positive int) and `-I mean,0` are rejected at parse with an `ERROR:` message (cal_max_gap / mem_pair divide-by-zero); also rejects non-finite `-I` mean/std/max (`nan`/`inf`, and overflowing tokens like `1e400` that `strtod` maps to `inf`). Env: `BWA_MEM3`; no staged inputs — validation fires during option parsing, before any reference is opened | "Argument range validation (-E / -I reject non-positive)" |
 | `readme_contract_lint.sh`    | this README names no script that was deleted, its source-only-lint block lists exactly the scripts that read no environment, every row's `Origin in ci.yml` names a step a workflow defines, and every script can emit the `PASS:`/`FAIL:` markers above | "README still describes the regression scripts"     |
 | `readme_contract_lint_selftest.sh` | the lint above still detects a stale README, so its `PASS` means something | "README lint still detects drift"                  |
 

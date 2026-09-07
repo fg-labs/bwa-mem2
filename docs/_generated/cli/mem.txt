@@ -69,7 +69,7 @@ Scoring options:
    -A INT        score for a sequence match, which scales options -TdBOELU unless overridden [1]
    -B INT        penalty for a mismatch [4]
    -O INT[,INT]  gap open penalties for deletions and insertions [6,6]
-   -E INT[,INT]  gap extension penalty; a gap of size k cost '{-O} + {-E}*k' [1,1]
+   -E INT[,INT]  gap extension penalty (must be positive); a gap of size k cost '{-O} + {-E}*k' [1,1]
    -L INT[,INT]  penalty for 5'- and 3'-end clipping [5,5]
    -U INT        penalty for an unpaired read pair [17]
 Input/output options:
@@ -118,8 +118,8 @@ Input/output options:
    -Y            use soft clipping for supplementary alignments
    -M            mark shorter split hits as secondary
    -I FLOAT[,FLOAT[,INT[,INT]]]
-                 specify the mean, standard deviation (10% of the mean if absent), max
-                 (4 sigma from the mean if absent) and min of the insert size distribution.
+                 specify the mean, standard deviation (10% of the mean if absent; must be
+                 positive), max (4 sigma from the mean if absent) and min of the insert size distribution.
                  Sets the FR distribution only and skips inference, so FF/RF/RR get none:
                  no proper-pair flag or mate rescue there. As in bwa/bwa-mem2. [inferred]
 Methylation (--meth) options:

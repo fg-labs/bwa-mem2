@@ -296,6 +296,30 @@ the canonical build: a default (non-`--meth`) run of a deterministic phiX paired
 match, byte-for-byte, its `--compat` counterpart with `MQ:i`/`HN:i` stripped — so any perturbation
 of the default path fails CI.
 
+## Degenerate numeric inputs (fail-fast, not silent)
+
+Two degenerate command lines that upstream bwa/bwa-mem2 accept but then mishandle
+are now rejected at parse, and the underlying divides are guarded defensively
+([#460](https://github.com/fg-labs/bwa-mem3/pull/460)).
+Both change behavior **only** on these degenerate inputs; all valid inputs are
+byte-identical — the full byte-identity suite (the `wgs-5M` / `wes-5M` / `hic-1M`
+alignment-record streams on x86 with the `c6a`/`c8g` cross-architecture check
+described above, plus the CI record-level phiX paired-end regression on the
+canonical build) is unaffected, since these guards are no-ops on every
+non-degenerate input:
+
+- **`-E 0`** (zero gap-extension penalty): upstream divides by it in
+  `cal_max_gap`, and the `(int)` cast of the resulting `inf`/`NaN` is undefined
+  behavior that resolves differently per architecture (`INT_MIN` on x86-64,
+  saturation on aarch64), so the same command line produced different seed
+  windows on the two shipped builds. `-E` now requires a positive integer;
+  `cal_max_gap` additionally treats a non-positive penalty as an unbounded gap.
+- **`-I mean,0`** (zero insert-size std), and a fixed-insert cohort where
+  `mem_pestat` estimates `std == 0`: upstream divides by it in `mem_pair`,
+  yielding `NaN` that collapses every pair score to 0 and silently disables
+  pair-aware placement. `-I` now requires a positive std; `mem_pair` guards the
+  divide (treating `std == 0` as `ns == 0`) so the `mem_pestat` path is safe too.
+
 ## What is preserved
 
 The figures in this section were measured **before** the 0.7.1 parity restoration and so

@@ -853,7 +853,12 @@ int mem_pair(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, cons
                 //printf("%d: %lld\n", k, dist);
                 if (dist > pes[dir].high) break;
                 if (dist < pes[dir].low)  continue;
-                ns = (dist - pes[dir].avg) / pes[dir].std;
+                // Guard std==0 (from -I mean,0 or a fixed-insert cohort where
+                // mem_pestat yields std=0): every surviving candidate already has
+                // dist==avg, so ns=0 is the right limit. Without this the divide
+                // is 0/0=NaN, the (int) cast of NaN is UB, and pairing silently
+                // collapses (q=0 for every pair).
+                ns = pes[dir].std > 0. ? (dist - pes[dir].avg) / pes[dir].std : 0.;
                 q = (int)((v.a[i].y>>32) + (v.a[k].y>>32) + .721 * log(2. * erfc(fabs(ns) * M_SQRT1_2)) * opt->a + .499); // .721 = 1/log(4)
                 if (q < 0) q = 0;
                 p = kv_pushp(pair64_t, u);
@@ -2072,17 +2077,22 @@ int mem_matesw_batch_pre(const mem_opt_t *opt, const bntseq_t *bns,
                 {
                     if (bwa_verbose >= 4) fprintf(stderr, "[0000][%0.4d] Re-allocating seqPairs in %s\n", tid, __func__);
                     *wsize_pair += 1024;
-                    mmc->seqPairArrayAux[tid] = (SeqPair *) realloc(mmc->seqPairArrayAux[tid],
-                                                        (*wsize_pair + MAX_LINE_LEN)
-                                                        * sizeof(SeqPair));
-                    mmc->seqPairArrayLeft128[tid] = (SeqPair *) realloc(mmc->seqPairArrayLeft128[tid],
-                                                        (*wsize_pair + MAX_LINE_LEN)
-                                                        * sizeof(SeqPair));
-                    mmc->seqPairArrayRight128[tid] = (SeqPair *) realloc(mmc->seqPairArrayRight128[tid],
-                                                        (*wsize_pair + MAX_LINE_LEN)
-                                                        * sizeof(SeqPair));
+                    // realloc into a temp + xassert: a failed grow must not leak
+                    // the old block and leave a NULL slot that later writes deref.
+                    SeqPair *tmp_aux = (SeqPair *) realloc(mmc->seqPairArrayAux[tid],
+                                                        (*wsize_pair + MAX_LINE_LEN) * sizeof(SeqPair));
+                    xassert(tmp_aux != NULL, "out of memory: seqPairArrayAux");
+                    mmc->seqPairArrayAux[tid] = tmp_aux;
+                    SeqPair *tmp_left = (SeqPair *) realloc(mmc->seqPairArrayLeft128[tid],
+                                                        (*wsize_pair + MAX_LINE_LEN) * sizeof(SeqPair));
+                    xassert(tmp_left != NULL, "out of memory: seqPairArrayLeft128");
+                    mmc->seqPairArrayLeft128[tid] = tmp_left;
+                    SeqPair *tmp_right = (SeqPair *) realloc(mmc->seqPairArrayRight128[tid],
+                                                        (*wsize_pair + MAX_LINE_LEN) * sizeof(SeqPair));
+                    xassert(tmp_right != NULL, "out of memory: seqPairArrayRight128");
+                    mmc->seqPairArrayRight128[tid] = tmp_right;
                     seqPairArray = mmc->seqPairArrayLeft128[tid];
-                    gar = (int32_t*) (mmc->seqPairArrayAux[tid]);               
+                    gar = (int32_t*) (mmc->seqPairArrayAux[tid]);
                 }
 
                 if (maxRefLen < sp.len1) maxRefLen = sp.len1;
