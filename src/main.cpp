@@ -57,19 +57,46 @@ int usage()
     return 1;
 }
 
-// Append a single argv token to the @PG CL: value. Tabs inside the token
-// (common when the caller passes e.g. `-R $'@RG\tID:x\tSM:y'`) would
-// otherwise bleed into the @PG line as extra tag-separators, producing
-// SAM that strict validators reject (issue #45 / upstream bwa-mem2#293).
-// Newlines and carriage returns would be worse still: a literal \n
-// terminates the @PG record mid-line and corrupts the whole header.
-// Replace any of these with a single space; do not mutate argv itself.
+// kstring.h's kputc grows *s by storing realloc's result straight into s->s
+// and then writing through it on the next line, with no NULL check -- an OOM
+// there is a null-pointer write, not a clean failure. kstring.h is a shared,
+// widely-included primitive (bam_writer.cpp, meth_bam.cpp, bwamem_extra.cpp
+// all call kputc on their own hot paths too), so changing its OOM contract
+// here would reach far outside this file. Instead, pre-grow the buffer with
+// our own checked realloc before every kputc call this file makes: once
+// pg->l + 1 < pg->m holds, kputc's internal growth check is false and it
+// only ever executes the plain assignment, never the unchecked realloc.
+static void kputc_checked(int c, kstring_t *pg)
+{
+    if (pg->l + 1 >= pg->m) {
+        size_t new_m = pg->l + 2;
+        kroundup32(new_m);
+        char *tmp = (char*) realloc(pg->s, new_m);
+        xassert(tmp != NULL, "out of memory: @PG CL: buffer");
+        pg->s = tmp;
+        pg->m = new_m;
+    }
+    kputc(c, pg);
+}
+
+// Append `arg` to the @PG CL: value, replacing any tab/newline/CR with a space
+// so it cannot bleed into the @PG line as a tag-separator or record terminator
+// (issue #45 / upstream bwa-mem2#293: unescaped tabs/newlines from e.g.
+// `-R $'@RG\tID:x\tSM:y'` would otherwise corrupt the @PG record). Does not
+// mutate argv itself.
+static void append_pg_cl_sanitized(kstring_t *pg, const char *arg)
+{
+    for (const char *c = arg; *c != '\0'; ++c) {
+        kputc_checked((*c == '\t' || *c == '\n' || *c == '\r') ? ' ' : *c, pg);
+    }
+}
+
+// A single space-separated argv token (argv[1..]). argv[0] is appended by
+// append_pg_cl_sanitized directly (no leading space, right after "CL:").
 static void append_pg_cl_arg(kstring_t *pg, const char *arg)
 {
-    kputc(' ', pg);
-    for (const char *c = arg; *c != '\0'; ++c) {
-        kputc((*c == '\t' || *c == '\n' || *c == '\r') ? ' ' : *c, pg);
-    }
+    kputc_checked(' ', pg);
+    append_pg_cl_sanitized(pg, arg);
 }
 
 // Measure the __rdtsc() tick rate (ticks per second) that every timing
@@ -160,14 +187,20 @@ int main(int argc, char* argv[])
      * introspect the binary on a host below floor:
      *   - `version`               always prints + warns (never refuses)
      *   - `<subcommand> --help`   prints help (never refuses)
-     *   - `<subcommand> -h`       same
+     *   - `index`/`shm` `-h`      same (there `-h` is a help alias)
+     * `-h` is NOT a help alias for `mem`: there it is the XA-hits option
+     * (`h:` in main_mem's optstring, fastmap.cpp), taking an INT value. So
+     * `mem -h 5 ref r1 r2` must NOT be treated as help -- doing so skipped the
+     * precheck and ran the full alignment on a below-floor host, the SIGILL the
+     * precheck exists to turn into a clean exit(2).
      * Only argv[2] is checked: matching --help / -h anywhere in argv
      * would false-positive on pathological invocations like
      * `mem -R --help ref r1 r2` (where --help is the VALUE of -R) and
      * skip the precheck for an actual alignment run. Realistic help
      * invocations put --help right after the subcommand. */
     bool wants_help = (argc >= 3) &&
-                      (strcmp(argv[2], "--help") == 0 || strcmp(argv[2], "-h") == 0);
+                      (strcmp(argv[2], "--help") == 0 ||
+                       (strcmp(argv[2], "-h") == 0 && strcmp(argv[1], "mem") != 0));
     if (strcmp(argv[1], "version") != 0 && !wants_help) {
         bwamem3_enforce_host_floor();
     }
@@ -191,8 +224,16 @@ int main(int argc, char* argv[])
         // optstring and long_opts table in fastmap.cpp::main_mem.
         static const char *const MEM_SHORT_OPTS_WITH_ARG =
             "kcvsrtRABOEUwLdTQDmINWxGhyKXHofz";
+        // Every required_argument entry in main_mem's long_opts (fastmap.cpp).
+        // optional_argument options (--bam, --meth, --rescue-kmer,
+        // --extend-mate-concordant) are omitted: getopt_long only binds those
+        // with `=`, so a following --help token is not consumed as their value.
         static const char *const MEM_LONG_OPTS_WITH_ARG[] = {
-            "--set-as-failed", "--supp-rep-hard-cap",
+            "--min-ext-len", "--max-extend-chains", "--dedup", "--dedup-reads",
+            "--chunk-cap", "--cohort-slices", "--rescue-band",
+            "--cohort-ramp-ratio", "--cohort-ramp-first", "--meth-scoring",
+            "--meth-tags", "--set-as-failed", "--supp-rep-hard-cap",
+            "--seed-order", "--compat",
 #ifdef STAGE_PROF
             "--profile",
 #endif
@@ -228,10 +269,10 @@ int main(int argc, char* argv[])
 
         fprintf(stderr, "-----------------------------\n");
         // Print the runtime-dispatched kernel tier rather than the compile-time
-        // baseline. Non-kernel TUs (including this one) build at sse41 baseline
-        // in the single-binary build, so a __AVX2__/__AVX512BW__ banner here
-        // would mislead AVX2/AVX-512 hosts into thinking they're running the
-        // SSE4.1 kernels.
+        // baseline. Non-kernel TUs (including this one) build at BASELINE_ARCH
+        // (avx2 by default, per the Makefile), so a compile-time
+        // __AVX2__/__AVX512BW__ banner here would misreport the tier that
+        // actually ran.
         fprintf(stderr, "Executing in %s mode!!\n",
                 bwamem3_simd_tier_name(bwamem3_simd_tier()));
         fprintf(stderr, "-----------------------------\n");
@@ -242,16 +283,18 @@ int main(int argc, char* argv[])
         // a `-u`-built index actually loaded at. It now prints from
         // fastmap.cpp::main_mem right after aux.fmi->load_index().
 
-        ksprintf(&pg, "@PG\tID:bwa-mem3\tPN:bwa-mem3\tVN:%s\tCL:%s", PACKAGE_VERSION, argv[0]);
+        // argv[0] is the first CL: token; sanitize it too (a tab/newline in the
+        // executable path would corrupt the @PG line exactly as a -R value did,
+        // issue #45) but without append_pg_cl_arg's leading space so the value
+        // stays "CL:<argv0> <argv1> ..." rather than "CL: <argv0> ...".
+        ksprintf(&pg, "@PG\tID:bwa-mem3\tPN:bwa-mem3\tVN:%s\tCL:", PACKAGE_VERSION);
+        append_pg_cl_sanitized(&pg, argv[0]);  // first token, no leading space
 
         for (int i = 1; i < argc; ++i) append_pg_cl_arg(&pg, argv[i]);
         ksprintf(&pg, "\n");
         bwa_pg = pg.s;
         ret = main_mem(argc-1, argv+1);
         free(bwa_pg);
-        
-        /** Enable this return to avoid printing of the runtime profiling **/
-        //return ret;
     }
     else if (strcmp(argv[1], "version") == 0)
     {
@@ -348,8 +391,9 @@ int main(int argc, char* argv[])
         fprintf(stderr, "\tMAX_SEQ_LEN_QER: %d\n", MAX_SEQ_LEN_QER);
         fprintf(stderr, "\tMAX_SEQ_LEN8: %d\n", MAX_SEQ_LEN8);
         fprintf(stderr, "\tSEEDS_PER_READ: %d\n", SEEDS_PER_READ);
-        fprintf(stderr, "\tSIMD_WIDTH8 X: %d\n", SIMD_WIDTH8);
-        fprintf(stderr, "\tSIMD_WIDTH16 X: %d\n", SIMD_WIDTH16);
+        // SIMD_WIDTH8/16 are omitted here: this TU is compiled at BASELINE_ARCH,
+        // so its compile-time values misreport the runtime-dispatched kernel
+        // tier (already printed as "Executing in <tier> mode" above).
         fprintf(stderr, "\tAVG_SEEDS_PER_READ: %d\n", AVG_SEEDS_PER_READ);
     }
     

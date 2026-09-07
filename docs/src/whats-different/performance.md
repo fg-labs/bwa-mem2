@@ -51,15 +51,20 @@ in the number of header lines. For a ~70 MB / ~1.5 M-line header (reported in
 upstream [bwa-mem2#204](https://github.com/bwa-mem2/bwa-mem2/pull/204)) this
 caused runtimes exceeding 10 minutes before alignment started.
 
-The fix introduces `bwa_insert_header_file`, a batched helper that determines
-the file size with `fseek`/`ftell`, allocates a single buffer, copies all
-`@`-prefixed lines in one pass, and calls `bwa_insert_header` once. The fix
-also addresses four correctness gaps in the upstream PR #204: the return-value
-assignment was dropped (leaving `hdr_line` stale after realloc), `const FILE*`
-caused compiler warnings, empty files were not guarded, and each `fgets` was
-not bounded by remaining buffer. A regression test
+The fix introduces `bwa_insert_header_file`, a batched helper that reads the
+`@`-prefixed lines into a single growable buffer in one pass, escaping each
+retained line in place as soon as it is complete (so a trailing backslash on
+one line can never consume the separator before the next), then joins the
+result onto the existing header with a single realloc rather than one per
+retained line. It reads line by line rather than sizing the buffer with
+`fseek`/`ftell`, so it also works on a non-seekable `-H` stream (a pipe,
+`/dev/stdin`, or `-H <(...)` process substitution) — where `ftell` returns
+`-1` and the earlier size-first approach silently discarded the whole header
+file. A single header line longer than a 64 KiB budget is rejected with a
+fatal error rather than silently truncated. A regression test
 (`test/header_insert_test.cpp`) diffs the batched path against the pre-patch
-per-line baseline across eight edge cases.
+per-line baseline across the supported edge cases, including the oversize-line
+rejection.
 
 ## libsais FM-index construction (PR #57)
 

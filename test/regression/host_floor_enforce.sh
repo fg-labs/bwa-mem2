@@ -5,13 +5,15 @@
 # host doesn't meet the build's SIMD floor. Uses the BWAMEM3_TESTING_HOST_TIER
 # injection hook (only present in builds compiled with -DBWAMEM3_TESTING).
 #
-# Two scenarios:
+# Three scenarios:
 #   1. 'bwa-mem3 mem ref r1.fq r2.fq' with a below-floor injected tier must
 #      exit 2 with a stderr message containing the [E::bwamem3] precheck
 #      header AND a "detected: <tier>" clause naming the injected tier.
 #   2. 'bwa-mem3 version' with the same injection must exit 0 and emit
 #      the [W::bwa-mem3] warning line on stderr (warnings always go to
 #      stderr regardless of the version banner's stdout stream).
+#   3. 'bwa-mem3 mem -h N ...' must ALSO exit 2: for mem, -h is the XA-hits
+#      option (an INT), not a help alias, so it must not bypass the precheck.
 #
 # Inputs:
 #   BWA_MEM3_TESTING — path to a binary built with `make TESTING_BUILD=1`
@@ -89,4 +91,23 @@ if grep -qE '\[W::bwa-mem3\]' "$OUT_DIR/version.stdout"; then
     exit 1
 fi
 
-echo "PASS: bwa-mem3 mem exits 2 and bwa-mem3 version warns on injected too-old host"
+# --- Scenario 3: 'mem -h N' still runs the precheck (must exit 2) ---
+# For `mem`, -h is the XA-hits option (takes an INT), NOT a help alias, so it
+# must not bypass the host-floor precheck the way `mem --help` / `index -h` do.
+rc=0
+BWAMEM3_TESTING_HOST_TIER="$INJECTED_TIER" \
+    "$BWA_MEM3_TESTING" mem -h 5 "$PARITY_FA" /dev/null /dev/null \
+    > "$OUT_DIR/memh.stdout" 2> "$OUT_DIR/memh.stderr" || rc=$?
+
+if [[ $rc -ne 2 ]]; then
+    echo "FAIL: bwa-mem3 mem -h 5 exited $rc (expected 2 — -h must not bypass the precheck)" >&2
+    cat "$OUT_DIR/memh.stderr" >&2
+    exit 1
+fi
+if ! grep -q '\[E::bwamem3\]' "$OUT_DIR/memh.stderr"; then
+    echo "FAIL: 'mem -h 5' stderr lacks the [E::bwamem3] precheck header (precheck skipped?)" >&2
+    cat "$OUT_DIR/memh.stderr" >&2
+    exit 1
+fi
+
+echo "PASS: bwa-mem3 mem (and 'mem -h N') exits 2 and bwa-mem3 version warns on injected too-old host"

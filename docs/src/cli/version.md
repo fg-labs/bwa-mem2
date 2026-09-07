@@ -9,8 +9,12 @@ dispatch to.
 
 `bwa-mem3 version` always exits 0 — even on a host below the build's
 SIMD floor — so operators can introspect a binary on a host that cannot
-actually run alignment. `bwa-mem3 <subcommand> --help` and `-h` share
-the same property.
+actually run alignment. `bwa-mem3 <subcommand> --help` shares the same
+property, as does `-h` for the subcommands where it is a help alias
+(`index`, `shm`). Note that `-h` is **not** a help alias for `mem` — there
+it is the XA-hits option (it takes an integer), so `bwa-mem3 mem -h N …`
+runs alignment and is subject to the SIMD-floor precheck like any other
+`mem` invocation.
 
 ## Synopsis
 

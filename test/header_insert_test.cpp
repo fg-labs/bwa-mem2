@@ -118,6 +118,19 @@ int main(int, char **)
               "@SQ\tSN:chr1\tLN:1000\n"},
              nullptr);
 
+    // Case 4b: a retained line ending in a lone trailing backslash, followed
+    // by another @ line. bwa_escape must not be able to treat the '\n'
+    // separator the batched path inserts between two retained lines as the
+    // second half of an escape sequence -- that would both mistranslate/drop
+    // the separator AND merge two SAM header records into one line. The
+    // per-line baseline never has this failure mode: it escapes and joins one
+    // line at a time, so bwa_escape never sees a separator it didn't itself
+    // just insert as the previous call's boundary.
+    run_case("trailing-backslash-then-at-line",
+             {"@CO\tfield\\\n",
+              "@SQ\tSN:chr1\tLN:1000\n"},
+             nullptr);
+
     // Case 5: empty file — calloc(1, 0) edge case. Must leave hdr unchanged
     // (null in / null out).
     run_case("empty-file", {}, nullptr);
@@ -177,6 +190,42 @@ int main(int, char **)
             exit(1);
         }
         fprintf(stderr, "OK:   oversize-line\n");
+    }
+
+    // Case 10: a NON-SEEKABLE stream (pipe). ftell() returns -1 on a pipe, so
+    // the pre-fix fseek/ftell sizing silently discarded the whole -H file. The
+    // read-side of a pipe is not seekable, so this exercises the line-by-line
+    // path. Independent oracle: the assembled, escaped header is hardcoded, not
+    // compared against another bwa_insert_header_file call.
+    {
+        int pfd[2];
+        assert(pipe(pfd) == 0);
+        pid_t pid = fork();
+        assert(pid >= 0);
+        if (pid == 0) {
+            close(pfd[0]);
+            const char *payload = "@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1000\n";
+            ssize_t w = write(pfd[1], payload, strlen(payload));
+            (void) w;
+            close(pfd[1]);
+            _exit(0);
+        }
+        close(pfd[1]);
+        FILE *fp = fdopen(pfd[0], "r");
+        assert(fp != nullptr);
+        char *out = bwa_insert_header_file(fp, nullptr);
+        fclose(fp);
+        int status = 0;
+        waitpid(pid, &status, 0);
+        const char *expected = "@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1000";
+        if (out == nullptr || strcmp(out, expected) != 0) {
+            fprintf(stderr, "FAIL: non-seekable pipe: got \"%s\", expected \"%s\"\n",
+                    out ? out : "(null)", expected);
+            free(out);
+            exit(1);
+        }
+        free(out);
+        fprintf(stderr, "OK:   non-seekable pipe\n");
     }
 
     fprintf(stderr, "ALL HEADER INSERT TESTS PASSED\n");
