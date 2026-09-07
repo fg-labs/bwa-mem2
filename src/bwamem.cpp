@@ -926,6 +926,29 @@ static inline mem_alnreg_t *dedup_gather_buf(int n)
     return (mem_alnreg_t *)scratch_grow(gather, (size_t)n * sizeof(mem_alnreg_t));
 }
 
+/* Shared tail of the two `re` pair sorts (see dedup_psc_finish for the
+ * by-score twin): `p` holds the n pairs in SOME sorted order. Scan for a tie
+ * (equal `re`); on one, rebuild the pairs from `src` in input order and
+ * ks_introsort them, reproducing bwa-mem2's permutation exactly; then gather
+ * `src` into `dst` through the pairs, exporting the permutation to `idx_out`
+ * if given. `tie_counter`, if non-NULL, is bumped when the fallback fires. */
+static inline void dedup_pre_finish(int n, const mem_alnreg_t *src, mem_alnreg_t *dst,
+                                    dedup_pair_re *p, uint32_t *idx_out, unsigned long *tie_counter)
+{
+    int tie = 0;
+    for (int i = 1; i < n; ++i)
+        if (!dedup_pre_lt(p[i - 1], p[i])) { tie = 1; break; }
+    if (tie) {  /* restore the pairs and reproduce introsort's permutation */
+        if (tie_counter) ++*tie_counter;
+        for (int i = 0; i < n; ++i) { p[i].re = src[i].re; p[i].idx = (uint32_t)i; }
+        ks_introsort_dedup_pre((size_t)n, p);
+    }
+    /* The single gather; `idx_out[i]` = input position of dst[i], which the
+     * incremental by-score sort uses to read the survivors back in input order. */
+    if (idx_out != NULL) for (int i = 0; i < n; ++i) { dst[i] = src[p[i].idx]; idx_out[i] = p[i].idx; }
+    else                 for (int i = 0; i < n; ++i) dst[i] = src[p[i].idx];
+}
+
 /* Sort `src` into `dst` by `re` (the default comparator), reproducing
  * ks_introsort(mem_ars2_m2)'s array exactly. On pair-buffer OOM, falls back to an
  * in-place introsort on a straight copy -- still byte-identical. Returns 1 and
@@ -950,18 +973,7 @@ static int dedup_perm_sort_by_re(int n, const mem_alnreg_t *src, mem_alnreg_t *d
     }
     for (int i = 0; i < n; ++i) { p[i].re = src[i].re; p[i].idx = (uint32_t)i; }
     pdqsort_dedup_pre((size_t)n, p);
-    int tie = 0;
-    for (int i = 1; i < n; ++i)
-        if (!dedup_pre_lt(p[i - 1], p[i])) { tie = 1; break; }
-    if (tie) {  /* restore the pairs and reproduce introsort's permutation */
-        for (int i = 0; i < n; ++i) { p[i].re = src[i].re; p[i].idx = (uint32_t)i; }
-        ks_introsort_dedup_pre((size_t)n, p);
-    }
-    /* The single gather; `idx_out[i]` = input position of dst[i], which the
-     * incremental by-score sort below uses to read the survivors back in input
-     * order. */
-    if (idx_out != NULL) for (int i = 0; i < n; ++i) { dst[i] = src[p[i].idx]; idx_out[i] = p[i].idx; }
-    else                 for (int i = 0; i < n; ++i) dst[i] = src[p[i].idx];
+    dedup_pre_finish(n, src, dst, p, idx_out, NULL);
     return 1;
 }
 
@@ -1037,8 +1049,11 @@ static void dedup_perm_sort_by_score(int n, const mem_alnreg_t *src, mem_alnreg_
 /* Test-only kill switch and per-thread counters (see the exposed accessors
  * below); the counters let the unit test prove which path a fixture took. */
 static int g_dedup_incremental = 1;
-struct dedup_incr_stats_t { unsigned long calls, budget_exhausted, tie_fallback, moves; };
-static thread_local dedup_incr_stats_t g_dedup_incr_stats = {0, 0, 0, 0};
+struct dedup_incr_stats_t {
+    unsigned long calls, budget_exhausted, tie_fallback, moves;                     /* by-score sort */
+    unsigned long re_calls, re_budget_exhausted, re_tie_fallback, re_rank_rejected, re_moves;  /* re sort */
+};
+static thread_local dedup_incr_stats_t g_dedup_incr_stats = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 /* Per-thread scratch: the input index of each gathered record (carried through
  * the compaction so the survivors can be read back in input order) and the
@@ -1054,22 +1069,81 @@ static inline int32_t *dedup_slot_buf(int n)
     return (int32_t *)scratch_grow(slots, (size_t)n * sizeof(int32_t));
 }
 
-/* Insertion sort of p[0..n) under dedup_psc_lt, spending at most `budget`
- * element moves. Returns 1 when fully sorted, 0 when the budget ran out; the
- * array is a permutation of the input either way. */
-static int dedup_insertion_sort_psc(int n, dedup_pair_sc *p, long budget)
-{
-    unsigned long moved = 0;
-    for (int i = 1; i < n; ++i) {
-        const dedup_pair_sc v = p[i];
-        int j = i;
-        while (j > 0 && dedup_psc_lt(v, p[j - 1])) { p[j] = p[j - 1]; --j; }
-        p[j] = v;
-        budget -= i - j;
-        moved += (unsigned long)(i - j);
-        if (budget < 0) { g_dedup_incr_stats.moves += moved; return 0; }
+/* Emit `static int fn(int n, pair_t *p, long budget)`: insertion sort of
+ * p[0..n) under `lt`, spending at most `budget` element moves. Returns 1 when
+ * fully sorted, 0 when the budget ran out; the array is a permutation of the
+ * input either way. `moves` names the stats field to charge. */
+#define DEDUP_INSERTION_SORT_INIT(fn, pair_t, lt, moves)                        \
+    static int fn(int n, pair_t *p, long budget)                                 \
+    {                                                                            \
+        for (int i = 1; i < n; ++i) {                                            \
+            const pair_t v = p[i];                                               \
+            int j = i;                                                           \
+            while (j > 0 && lt(v, p[j - 1])) { p[j] = p[j - 1]; --j; }           \
+            p[j] = v;                                                            \
+            budget -= i - j;                                                     \
+            g_dedup_incr_stats.moves += (unsigned long)(i - j);                  \
+            if (budget < 0) return 0;                                            \
+        }                                                                        \
+        return 1;                                                                \
     }
-    g_dedup_incr_stats.moves += moved;
+DEDUP_INSERTION_SORT_INIT(dedup_insertion_sort_psc, dedup_pair_sc, dedup_psc_lt, moves)
+DEDUP_INSERTION_SORT_INIT(dedup_insertion_sort_pre, dedup_pair_re, dedup_pre_lt, re_moves)
+
+/* Incremental `re` sort for the dedup-only call sites: the by-score twin's
+ * argument applies unchanged (a correct sort from a good starting order, then
+ * the same tie scan and input-order introsort fallback as dedup_perm_sort_by_re,
+ * so the result is byte-identical for ANY starting order). The starting order
+ * comes from `dedup_re_rank`: each survivor of the previous call carries its
+ * position in that call's `re`-ordered (post-window) array, and nothing between
+ * the calls changes a record's `re`, so the ranked records in rank order are
+ * already sorted and only the unranked (freshly rescued, rank 0) records have
+ * to be inserted. Ranks are validated, not trusted: any rank outside [1, n] or
+ * a duplicate rejects the ranked order (memo-copied reads carry a
+ * representative's ranks) and the sort starts from input order instead, where
+ * the budget bounds the cost before pdqsort takes over. */
+static int dedup_incr_sort_by_re(int n, const mem_alnreg_t *src, mem_alnreg_t *dst,
+                                 uint32_t *idx_out)
+{
+    xassert(src != dst, "dedup incremental re sort requires distinct source and destination buffers");
+    dedup_pair_re *p =
+        (dedup_pair_re *)dedup_pair_buf((size_t)n * sizeof(dedup_pair_re));
+    int32_t *slot = (p != NULL) ? dedup_slot_buf(n) : NULL;
+    /* Scratch OOM: the permutation sort (same array; correctness by delegation). */
+    if (p == NULL || slot == NULL) return dedup_perm_sort_by_re(n, src, dst, idx_out);
+    ++g_dedup_incr_stats.re_calls;
+
+    /* Starting order: ranked records by rank, then unranked in input order. */
+    for (int k = 0; k < n; ++k) slot[k] = -1;
+    int rejected = 0;
+    for (int i = 0; i < n && !rejected; ++i) {
+        const int32_t r = src[i].dedup_re_rank;
+        if (r == 0) continue;
+        if (r < 0 || r > n || slot[r - 1] >= 0) rejected = 1;
+        else slot[r - 1] = i;
+    }
+    int m = 0;
+    if (rejected) {
+        ++g_dedup_incr_stats.re_rank_rejected;
+        for (int i = 0; i < n; ++i) { p[m].re = src[i].re; p[m].idx = (uint32_t)i; ++m; }
+    } else {
+        for (int k = 0; k < n; ++k) {
+            const int i = slot[k];
+            if (i < 0) continue;
+            p[m].re = src[i].re; p[m].idx = (uint32_t)i; ++m;
+        }
+        for (int i = 0; i < n; ++i) {
+            if (src[i].dedup_re_rank != 0) continue;
+            p[m].re = src[i].re; p[m].idx = (uint32_t)i; ++m;
+        }
+    }
+    xassert(m == n, "dedup incremental re sort: starting order lost a record");
+
+    if (!dedup_insertion_sort_pre(n, p, 8L * n + 64)) {
+        ++g_dedup_incr_stats.re_budget_exhausted;
+        pdqsort_dedup_pre((size_t)n, p);
+    }
+    dedup_pre_finish(n, src, dst, p, idx_out, &g_dedup_incr_stats.re_tie_fallback);
     return 1;
 }
 
@@ -1139,6 +1213,27 @@ void bwamem3_dedup_incr_sort_by_score(int n, mem_alnreg_t *a, const uint32_t *id
 }
 /* Test-only: disable/enable the incremental sort in mem_sort_dedup_patch, and
  * read/reset this thread's counters. */
+/* In-place wrapper for the incremental `re` sort: uses the records' own
+ * dedup_re_rank values as the starting order. */
+void bwamem3_dedup_incr_sort_by_re(int n, mem_alnreg_t *a)
+{
+    mem_alnreg_t *tmp = dedup_gather_buf(n);
+    if (tmp == NULL) { ks_introsort(mem_ars2_m2, n, a); return; }
+    dedup_incr_sort_by_re(n, a, tmp, NULL);
+    memcpy(a, tmp, (size_t)n * sizeof(*a));
+}
+void bwamem3_dedup_incr_re_stats(unsigned long *calls, unsigned long *budget_exhausted,
+                                 unsigned long *tie_fallback, unsigned long *rank_rejected,
+                                 unsigned long *moves, int reset)
+{
+    dedup_incr_stats_t &s = g_dedup_incr_stats;
+    if (calls) *calls = s.re_calls;
+    if (budget_exhausted) *budget_exhausted = s.re_budget_exhausted;
+    if (tie_fallback) *tie_fallback = s.re_tie_fallback;
+    if (rank_rejected) *rank_rejected = s.re_rank_rejected;
+    if (moves) *moves = s.re_moves;
+    if (reset) s.re_calls = s.re_budget_exhausted = s.re_tie_fallback = s.re_rank_rejected = s.re_moves = 0;
+}
 void bwamem3_dedup_incremental_set(int on) { g_dedup_incremental = on ? 1 : 0; }
 void bwamem3_dedup_incr_stats(unsigned long *calls, unsigned long *budget_exhausted,
                               unsigned long *tie_fallback, unsigned long *moves, int reset)
@@ -1360,7 +1455,11 @@ int mem_sort_dedup_patch(const mem_opt_t *opt, const bntseq_t *bns,
      * order + pdqsort unconditionally, resolving equal-`re` ties differently. */
     if (opt->alnreg_sort_fast) pdqsort_mem_ars2(n, a);       // sort by the END position, not START!
     else if (scr) {
-        if (!dedup_perm_sort_by_re(n, a, scr, idx)) idx = NULL;   /* OOM path: no permutation */
+        /* Dedup-only callers start the `re` sort from the previous call's
+         * order (dedup_re_rank); the OOM path reports no permutation. */
+        const int ok = (idx != NULL) ? dedup_incr_sort_by_re(n, a, scr, idx)
+                                     : dedup_perm_sort_by_re(n, a, scr, NULL);
+        if (!ok) idx = NULL;
         mem_alnreg_t *t = a; a = scr; scr = t;
     }
     else           dedup_sort_by_re(n, a);
@@ -1407,6 +1506,10 @@ int mem_sort_dedup_patch(const mem_opt_t *opt, const bntseq_t *bns,
             ++m;
         }
     n = m;
+    /* Remember this call's `re` order on the survivors (positions in the
+     * compacted, still re-ordered array) so a following dedup-only call can
+     * start its `re` sort from it. Perf-only scratch, see mem_alnreg_t. */
+    for (i = 0; i < n; ++i) a[i].dedup_re_rank = i + 1;
     if (opt->alnreg_sort_fast)                 pdqsort_mem_ars(n, a);
     else if (scr && n >= DEDUP_PERM_MIN) {
         if (idx) dedup_incr_sort_by_score(n, a, scr, idx, n_in);
@@ -3710,9 +3813,9 @@ static inline void read_memo_copy_regs(mem_alnreg_v *dst, const mem_alnreg_v *sr
 
 /* [dedup-reads] VERIFY (BWAMEM3_DEDUP_READS_VERIFY): the first mem_alnreg_t field
  * that differs between a duplicate's own regs and its representative's, or NULL
- * if identical. Excludes ->c (dangling, NULL'd at kernel2 exit) and ->hash (set
- * per-read later in the SAM stage); everything else is the position-invariant
- * payload the memo copies. */
+ * if identical. Excludes ->c (dangling, NULL'd at kernel2 exit), ->hash (set
+ * per-read later in the SAM stage) and ->dedup_re_rank (perf-only sort scratch);
+ * everything else is the position-invariant payload the memo copies. */
 static const char *read_memo_alnreg_field_diff(const mem_alnreg_t *a, const mem_alnreg_t *b)
 {
 #define RM_D(f) do { if ((a)->f != (b)->f) return #f; } while (0)

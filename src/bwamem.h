@@ -381,6 +381,17 @@ typedef struct mem_alnreg_t {
     int64_t rb, re; // [rb,re): reference sequence in the alignment
     int qb, qe;     // [qb,qe): query sequence in the alignment
     int rid;        // reference seq ID
+    /* Scratch for mem_sort_dedup_patch, perf-only: 0 = unranked, r > 0 = this
+     * record sat at position r-1 of the previous dedup call's post-window
+     * (reference-end ordered) array. The next dedup-only call starts its `re`
+     * sort from that order; the value is never trusted for correctness (a
+     * stale or duplicate rank only costs time). Lives in what was the padding
+     * between `rid` and `c`, so the record stays 112 bytes (static_assert
+     * below). Fresh records are zero-initialised on every alignment-creation
+     * path (calloc at extension, memset in mate rescue), so a new record reads
+     * as unranked; the --dedup-reads memo copy instead carries the
+     * representative's rank, which the sort validates rather than trusts. */
+    int32_t dedup_re_rank;
     mem_chain_t *c;
     int score;      // best local SW score
     int truesc;     // actual score corresponding to the aligned region; possibly smaller than $score
@@ -413,6 +424,11 @@ typedef struct mem_alnreg_t {
      * (Output XG/XM still use the raw meth_hypothesis — the genome strand.) */
     int8_t meth_strand_hyp;
 } mem_alnreg_t;
+#ifdef __cplusplus
+static_assert(sizeof(mem_alnreg_t) == 112,
+              "mem_alnreg_t must stay 112 bytes: dedup_re_rank fills the padding after rid; "
+              "growing the record raises the gather traffic the dedup sorts are bound by");
+#endif
 
 typedef struct { size_t n, m; mem_alnreg_t *a; int capped_w; } mem_alnreg_v;
 /* capped_w: max WEIGHT among chains the cap/gate dropped before extension, carried
