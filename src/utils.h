@@ -118,6 +118,20 @@ extern "C" {
 
 	void ks_introsort_64 (size_t n, uint64_t *a);
 	void ks_introsort_128(size_t n, pair64_t *a);
+	/* pdqsort on the same (x, y) order as ks_introsort_128. Only for arrays
+	 * whose (x, y) keys are pairwise distinct: the sorted order is then unique
+	 * and the two produce the same array (see mem_pair, which guards the
+	 * distinctness with pair64_strictly_sorted after each sort). */
+	void pdqsort_128(size_t n, pair64_t *a);
+	/* The (x, y) order both sorts use. */
+#define pair64_lt(a, b) ((a).x < (b).x || ((a).x == (b).x && (a).y < (b).y))
+	/* 1 if every adjacent pair of a sorted array is strictly ordered, i.e. the
+	 * keys were pairwise distinct and the sorted order is unique. */
+	static inline int pair64_strictly_sorted(size_t n, const pair64_t *a)
+	{
+		for (size_t i = 1; i < n; ++i) if (!pair64_lt(a[i - 1], a[i])) return 0;
+		return 1;
+	}
 
 #ifdef __cplusplus
 }

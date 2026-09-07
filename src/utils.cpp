@@ -42,8 +42,10 @@
 #include "utils.h"
 
 #include "ksort.h"
-#define pair64_lt(a, b) ((a).x < (b).x || ((a).x == (b).x && (a).y < (b).y))
+#include "pdqsort_wrap.h"
+/* pair64_lt comes from utils.h */
 KSORT_INIT(128, pair64_t, pair64_lt)
+PDQSORT_INIT(128, pair64_t, pair64_lt)
 KSORT_INIT(64,  uint64_t, ks_lt_generic)
 
 #include "kseq.h"
