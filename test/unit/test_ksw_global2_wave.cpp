@@ -31,7 +31,7 @@
 #include "scoring.h"      // build_scoring_matrix
 #include "seqpair.h"      // TestPair
 #include "seqpair_gen.h"  // deterministic generators
-#include "simd_dispatch.h"  // bwamem3_simd_tier, BWAMEM3_TIER_*
+#include "simd_dispatch.h"  // bwamem3_simd_init, bwamem3_simd_tier, BWAMEM3_TIER_*
 
 namespace {
 
@@ -123,22 +123,20 @@ std::vector<TestPair> build_bulk_random(std::mt19937 &rng, int n) {
 }
 
 // Band widths to test per pair, each clamped up to the pair's feasibility floor.
-// Spans below/at/above the per-arch crossovers (16/20/26) plus wide bands that
-// force the interior fast-path chunk, so both the boundary-only and the
-// interior code paths are exercised regardless of the compiled tier.
-const int kBandTargets[] = {3, 16, 20, 26, 33, 64, 200};
+// Spans below/at/above the per-arch crossovers (int16 10/10/16, int32 16/26/52
+// across AVX-512/AVX2/NEON) plus wide bands that force the interior fast-path
+// chunk, so both the boundary-only and the interior code paths are exercised
+// regardless of the compiled tier. 9/10 straddle the AVX2 / AVX-512 int16
+// crossover exactly (KSW_WAVE16_WMIN = 10 on those tiers; NEON's is 16, covered
+// by the 16 entry) and 32/33 the AVX2 tier's former value (33), so byte-identity
+// -- and, via run_parity's routing gate, which kernel ran -- is asserted right
+// at the current boundary and at the old one the crossover was lowered from.
+const int kBandTargets[] = {3, 9, 10, 16, 20, 26, 32, 33, 64, 200};
 
 // One (o_del,e_del,o_ins,e_ins) tuple per index; asymmetric gaps included so the
 // del/ins direction bytes are exercised independently.
 struct GapSet { int o_del, e_del, o_ins, e_ins; };
 const GapSet kGapSets[] = {{5, 2, 5, 2}, {6, 1, 6, 1}, {4, 3, 7, 1}};
-
-// Band width at/above which EVERY wavefront tier must dispatch to a SIMD kernel:
-// 64 clears the widest per-arch crossover (NEON int32 KSW_WAVE_WMIN = 52), so a
-// wavefront-capable tier that leaves the exec counter unmoved at this width has
-// silently degenerated to scalar-vs-scalar. Narrower widths can legitimately stay
-// scalar on some tier, so the exec-count gate is asserted only at/above this width.
-const int kWaveExecGateWidth = 64;
 
 bool cigar_eq(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
     return a == b;
@@ -149,6 +147,12 @@ bool cigar_eq(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
 // scalar-vs-scalar and proves nothing about the SIMD path — the exec-count gate
 // below is therefore asserted only on these tiers.
 bool tier_has_wavefront() {
+    // bwamem3_simd_tier() reports BWAMEM3_TIER_NONE until the dispatcher is
+    // initialised. On x86 the dispatched exec-count hooks initialise it as a side
+    // effect, but on NEON (single tier, hooks called directly) nothing does, so
+    // without this call the probe read "no wavefront" and every routing gate below
+    // was skipped on arm64. Idempotent (std::call_once inside).
+    bwamem3_simd_init();
     const int tier = bwamem3_simd_tier();
     return tier == BWAMEM3_TIER_AVX2 || tier == BWAMEM3_TIER_AVX512BW ||
            tier == BWAMEM3_TIER_NEON;
@@ -161,9 +165,11 @@ bool tier_has_wavefront() {
 // re-enters this body once per leaf, so the accumulators below scope naturally
 // to one (gap, w) variant. `expect_int16` is set by callers whose pairs are all
 // int16-safe, adding a gate that the narrow int16 kernel actually ran rather
-// than every pair falling back to the int32 wave.
+// than every pair falling back to the int32 wave; `expect_int16_rejected` by
+// callers whose pairs all fail the int16 range gate, asserting the int16 kernel
+// never ran (the fallback really is the int32 wave or scalar).
 void run_parity(const std::vector<TestPair> &pairs, const int8_t *mat,
-                bool expect_int16 = false) {
+                bool expect_int16 = false, bool expect_int16_rejected = false) {
     for (const GapSet &g : kGapSets) {
         const std::string gname = "gap[" + std::to_string(g.o_del) + "," +
             std::to_string(g.e_del) + "," + std::to_string(g.o_ins) + "," +
@@ -209,18 +215,35 @@ void run_parity(const std::vector<TestPair> &pairs, const int8_t *mat,
                     CHECK(score_mism == 0);
                     CHECK(ncigar_mism == 0);
                     CHECK(cigar_mism == 0);
-                    // At/above kWaveExecGateWidth every wavefront tier must take
-                    // the SIMD path (m==5, CIGAR requested, w clears every WMIN),
-                    // so an unmoved counter here means the run silently degenerated
-                    // to scalar-vs-scalar. Narrower widths can legitimately stay
-                    // scalar on some tier; on a scalar tier the count stays zero by
-                    // design. The int16 gate additionally proves the narrow kernel
-                    // ran (not the whole set falling back to int32) — only for
-                    // callers whose pairs are all int16-safe.
-                    if (tier_has_wavefront() && wt >= kWaveExecGateWidth) {
-                        CHECK(ksw_g2_wave_exec_count() > wave_before);
-                        if (expect_int16)
+                    // Routing gate against the tier's OWN compiled crossovers (the
+                    // test hooks return KSW_WAVE_WMIN / KSW_WAVE16_WMIN for the
+                    // active tier, 0 where it has no such kernel), so the gate is
+                    // exact on every tier instead of a hard-coded wide width:
+                    //  - wt >= the int32 crossover: some wavefront kernel must have
+                    //    run for every pair (int16 where the range fits, else
+                    //    int32) -- an unmoved counter means the run silently
+                    //    degenerated to scalar-vs-scalar;
+                    //  - int16-safe pairs at wt >= the int16 crossover: the narrow
+                    //    int16 kernel itself must have run -- this is what pins the
+                    //    lowered AVX2 crossover (10): a constant that drifted back
+                    //    up would leave w in [10, old) scalar and fail here;
+                    //  - int16-rejected pairs: the int16 kernel must never run.
+                    // Every pair's actual w is >= wt (the floor only raises it), so
+                    // a gate keyed on wt holds for the whole set. On a scalar tier
+                    // both crossovers read 0 and no gate applies.
+                    if (tier_has_wavefront()) {
+                        const int wmin32 = ksw_g2_wave_wmin();
+                        const int wmin16 = ksw_g2_wave16_wmin();
+                        REQUIRE(wmin32 > 0);
+                        REQUIRE(wmin16 > 0);
+                        if (wt >= wmin32)
+                            CHECK(ksw_g2_wave_exec_count() > wave_before);
+                        if (expect_int16 && wt >= wmin16) {
+                            CHECK(ksw_g2_wave_exec_count() > wave_before);
                             CHECK(ksw_g2_wave16_exec_count() > wave16_before);
+                        }
+                        if (expect_int16_rejected)
+                            CHECK(ksw_g2_wave16_exec_count() == wave16_before);
                     }
                 }
             }
@@ -257,7 +280,15 @@ TEST_CASE("wavefront ksw_global2 byte-identical on short/low-penalty pairs (int1
     for (int i = 0; i < 200; i++) pairs.push_back(bwa_tests::gen_random_pair(rng, qd(rng), rd(rng)));
     pairs.push_back(bwa_tests::gen_with_n_bases_pair(rng, 76, 80, 6));   // N bases in the int16 regime
     pairs.push_back(bwa_tests::gen_exact_match_pair(76));
+    // Equal-length pairs (band_floor == 3) so the exact crossover widths in
+    // kBandTargets (9/10/32/33) run un-clamped in the int16-SAFE range too,
+    // mirroring the int16-fallback case below: the random pairs above have large
+    // |tlen-qlen|, so their floor clamps those narrow widths away. all_mismatch
+    // and homopolymer keep qlen == tlen (unlike gen_exact_match_pair, whose ref
+    // is 2x the query), so the routing gate pins the narrow int16 kernel right at
+    // the lowered AVX2 crossover and at the old boundary it was lowered from.
     pairs.push_back(bwa_tests::gen_all_mismatch_pair(76));
+    pairs.push_back(bwa_tests::gen_homopolymer_pair(76, 0));
     // These pairs are all short/low-penalty, so their score range provably fits
     // int16 — assert the narrow int16 kernel actually ran, not just some wave.
     run_parity(pairs, mat.data(), /*expect_int16=*/true);
@@ -266,9 +297,10 @@ TEST_CASE("wavefront ksw_global2 byte-identical on short/low-penalty pairs (int1
 // Long queries push H_upper = qlen*A + A past the int16 gate's ceiling
 // (32767 - SLACK = 32703), so ksw_g2_wave16_safe returns false and the
 // dispatcher must fall back to the int32 wave (w >= its WMIN) or scalar. This is
-// the ONLY case in the suite that exercises the int32 wavefront kernel on tiers
-// where KSW_WAVE16_WMIN <= KSW_WAVE_WMIN (AVX-512, NEON) — there the int16 tier
-// otherwise always wins the safe-and-wide-enough race. Confirms the cascade
+// the ONLY case in the suite that exercises the int32 wavefront kernel: every
+// wavefront tier now has KSW_WAVE16_WMIN <= KSW_WAVE_WMIN (AVX2 10/26, AVX-512
+// 10/16, NEON 16/52), so the int16 tier otherwise always wins the
+// safe-and-wide-enough race. Confirms the cascade
 // stays byte-identical when the int16 tier is rejected. (The score matrix is
 // int8_t, so |value| <= 127; with the max match score A=127, qlen>256 is what
 // takes H_upper over the ceiling — hence the >256bp query lengths here.)
@@ -281,7 +313,17 @@ TEST_CASE("wavefront ksw_global2 byte-identical when int16 falls back to int32/s
     std::vector<bwa_tests::TestPair> pairs;
     std::uniform_int_distribution<int> qd(270, 360), rd(270, 370);
     for (int i = 0; i < 25; i++) pairs.push_back(bwa_tests::gen_random_pair(rng, qd(rng), rd(rng)));
-    run_parity(pairs, mat.data());
+    // Equal-length pairs (band_floor == 3) so the exact crossover widths in
+    // kBandTargets (9/10/32/33) run without being clamped up in the int16-
+    // fallback range too. The random pairs above have large |tlen-qlen|, so
+    // their floor clamps those narrow widths away; these prove byte-identity at
+    // the boundaries on the int32-wave/scalar cascade the int16 gate falls back
+    // to for these long queries. all_mismatch and homopolymer keep qlen == tlen
+    // (unlike gen_exact_match_pair, whose ref is 2x the query); both stay >= 270
+    // so H_upper still clears the int16 gate's ceiling.
+    pairs.push_back(bwa_tests::gen_all_mismatch_pair(300));
+    pairs.push_back(bwa_tests::gen_homopolymer_pair(300, 0));
+    run_parity(pairs, mat.data(), /*expect_int16=*/false, /*expect_int16_rejected=*/true);
 }
 
 // Windowed high-water decay of the direction-byte store zr (see

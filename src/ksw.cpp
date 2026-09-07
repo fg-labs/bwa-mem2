@@ -661,6 +661,27 @@ static thread_local unsigned long g_ksw_wave16_exec_count = 0;
 extern "C" unsigned long ksw_g2_wave_exec_count(void) { return g_ksw_wave_exec_count; }
 extern "C" unsigned long ksw_g2_wave16_exec_count(void) { return g_ksw_wave16_exec_count; }
 
+/* Test-only: the width crossovers this tier's ksw_global2 was compiled with, so
+ * the differential unit test can assert routing (which kernel ran at a given w)
+ * against the real per-tier constants instead of a hard-coded width -- a
+ * regression of either constant then fails loudly rather than passing as
+ * scalar-vs-scalar. 0 means this tier has no such kernel. Not read on any
+ * production path. */
+extern "C" int ksw_g2_wave16_wmin(void) {
+#ifdef KSW_WAVE16_WMIN
+	return KSW_WAVE16_WMIN;
+#else
+	return 0;
+#endif
+}
+extern "C" int ksw_g2_wave_wmin(void) {
+#ifdef KSW_WAVE_WMIN
+	return KSW_WAVE_WMIN;
+#else
+	return 0;
+#endif
+}
+
 /* Per-thread wavefront scratch. File-scope (previously a function-local static
  * inside ksw_global2, same static thread_local lifetime) so the test-only
  * capacity getter below can observe the retained direction-byte store zr and
