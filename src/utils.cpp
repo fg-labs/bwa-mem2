@@ -213,7 +213,11 @@ char* err_fgets(char *str, int size, FILE *stream)
 	char* ret = fgets(str, size, stream );
 	if (ret == NULL)
 	{
-		_err_fatal_simple("fgets", strerror(errno));
+		/* fgets returns NULL on EOF as well as on error, and errno is not set
+		 * on EOF -- so reporting strerror(errno) unconditionally names a stale,
+		 * misleading cause on a truncated input. Distinguish the two the way
+		 * err_fread_noeof does. */
+		_err_fatal_simple("fgets", ferror(stream) ? strerror(errno) : "Unexpected end of file");
 	}
 
 	return ret;

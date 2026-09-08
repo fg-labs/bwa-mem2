@@ -287,8 +287,11 @@ static uint8_t *add1(const kseq_t *seq, bntseq_t *bns, uint8_t *pac, int64_t *m_
 	int i, lasts;
 	if (bns->n_seqs == *m_seqs) {
 		*m_seqs <<= 1;
-		bns->anns = (bntann1_t*)realloc(bns->anns, *m_seqs * sizeof(bntann1_t));
-        xassert(bns->anns != NULL, "out of memory: bns->anns");
+		/* Grow via a temp so a failed realloc neither leaks the old block nor
+		 * leaves the live pointer NULL (deref'd below). */
+		bntann1_t *tmp = (bntann1_t*)realloc(bns->anns, *m_seqs * sizeof(bntann1_t));
+		xassert(tmp != NULL, "out of memory: bns->anns");
+		bns->anns = tmp;
 	}
 	p = bns->anns + bns->n_seqs;
 	p->name = strdup((char*)seq->name.s);
@@ -304,7 +307,11 @@ static uint8_t *add1(const kseq_t *seq, bntseq_t *bns, uint8_t *pac, int64_t *m_
 			} else {
 				if (bns->n_holes == *m_holes) {
 					(*m_holes) <<= 1;
-					bns->ambs = (bntamb1_t*)realloc(bns->ambs, (*m_holes) * sizeof(bntamb1_t));
+					/* temp + check: a failed realloc-onto-self would leak the old
+					 * block and NULL bns->ambs, then *q below derefs it. */
+					bntamb1_t *tmp = (bntamb1_t*)realloc(bns->ambs, (*m_holes) * sizeof(bntamb1_t));
+					xassert(tmp != NULL, "out of memory: bns->ambs");
+					bns->ambs = tmp;
 				}
 				*q = bns->ambs + bns->n_holes;
 				(*q)->len = 1;
@@ -319,7 +326,11 @@ static uint8_t *add1(const kseq_t *seq, bntseq_t *bns, uint8_t *pac, int64_t *m_
 			if (c >= 4) c = lrand48()&3;
 			if (bns->l_pac == *m_pac) { // double the pac size
 				*m_pac <<= 1;
-				pac = (uint8_t*) realloc(pac, *m_pac/4);
+				/* temp + check: without it a failed realloc leaks the old pac and
+				 * the memset below derefs the NULL it left behind. */
+				uint8_t *tmp = (uint8_t*) realloc(pac, *m_pac/4);
+				if (tmp == NULL) { perror("Reallocation of pac failed"); exit(EXIT_FAILURE); }
+				pac = tmp;
 				memset(pac + bns->l_pac/4, 0, (*m_pac - bns->l_pac)/4);
 			}
 			_set_pac(pac, bns->l_pac, c);
@@ -362,8 +373,10 @@ int64_t bns_fasta2bntseq(gzFile fp_fa, const char *prefix, int for_only)
 	while (kseq_read(seq) >= 0) pac = add1(seq, bns, pac, &m_pac, &m_seqs, &m_holes, &q);
 	if (!for_only) { // add the reverse complemented sequence
 		m_pac = (bns->l_pac * 2 + 3) / 4 * 4;
-		pac = (uint8_t*) realloc(pac, m_pac/4);
-		if (pac == NULL) { perror("Reallocation of pac failed"); exit(EXIT_FAILURE); }
+		/* temp + check so a failed grow doesn't leak the old pac before aborting. */
+		uint8_t *tmp = (uint8_t*) realloc(pac, m_pac/4);
+		if (tmp == NULL) { perror("Reallocation of pac failed"); exit(EXIT_FAILURE); }
+		pac = tmp;
 		memset(pac + (bns->l_pac+3)/4, 0, (m_pac - (bns->l_pac+3)/4*4) / 4);
 		for (l = bns->l_pac - 1; l >= 0; --l, ++bns->l_pac)
 			_set_pac(pac, bns->l_pac, 3-_get_pac(pac, l));

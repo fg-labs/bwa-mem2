@@ -488,6 +488,19 @@ jobs:
           ./packed_text_neg_nbases_test
           ./packed_text_overflow_nbases_test
           ./mem_gen_alt_zero_calloc_test
+      - name: err_fgets reports EOF as EOF, not a stale errno
+        # A forked death-test: err_fgets aborts via _err_fatal_simple on a NULL
+        # fgets return, and fgets returns NULL for clean EOF as well as error
+        # (errno unset on EOF). The child triggers the EOF abort; the parent
+        # asserts the diagnostic names "Unexpected end of file", not a leftover
+        # strerror. Reachable only from `make test` otherwise; run on every row.
+        run: |
+          if [ "${{ matrix.arch_flag }}" = "" ]; then
+            make err_fgets_eof_test CXX=${{ matrix.cxx || 'clang++-19' }} USE_MIMALLOC=${{ matrix.use_mimalloc }}
+          else
+            make err_fgets_eof_test arch=${{ matrix.arch_flag }} CXX=${{ matrix.cxx || 'clang++-19' }} USE_MIMALLOC=${{ matrix.use_mimalloc }}
+          fi
+          ./err_fgets_eof_test
 
       - name: Fast-reader batch reader safety and coverage
         # Standalone tests for the fast_reader stack and bseq_read_fast adapter,

@@ -18,6 +18,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <memory>
+#include <new>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -77,7 +78,11 @@ void write_doubled_pac(const char* fwd_pac_path, int64_t l_pac,
     // Default-init via new[]: every byte is unconditionally overwritten in
     // the parallel loop below, so the value-init zero-fill that
     // std::vector<uint8_t>(n, 0) performed was wasted bandwidth.
-    std::unique_ptr<uint8_t[]> buf(new uint8_t[(size_t)nbytes]);
+    // new (nothrow): a throwing new[] on OOM calls std::terminate, which runs no
+    // atexit handlers -- bypassing scratch cleanup. err_fatal prints a `[func]
+    // message` diagnostic and exit()s, running the cleanup path.
+    std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[(size_t)nbytes]);
+    if (!buf) err_fatal(__func__, "out of memory: %lld bytes for the 2-bit pack buffer", (long long)nbytes);
 
     auto base_at = [&](int64_t idx) -> uint8_t {
         // Forward half: fwd[idx]. RC half: complement of fwd[l_pac-1-(idx-l_pac)].
@@ -281,7 +286,10 @@ int libsais_build_fm_index(const char* prefix, int64_t pac_len,
     // buf[N] is set explicitly to the GSA terminator below, so the
     // value-init zero-fill std::vector<uint8_t>(N+1) performed was a wasted
     // ~6.2 GiB write on a doubled-human input.
-    std::unique_ptr<uint8_t[]> buf(new uint8_t[(size_t)(N + 1)]);
+    // new (nothrow) + err_fatal: OOM here must run the TmpGuard cleanup (see
+    // below), which a throwing new[] -> std::terminate would skip.
+    std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[(size_t)(N + 1)]);
+    if (!buf) err_fatal(__func__, "out of memory: %lld bytes for the SAIS input buffer", (long long)(N + 1));
     // Capture out-of-range bases without crashing inside the OpenMP region:
     // err_fatal terminates via exit(), which interacts poorly with libomp's
     // teardown when other threads are mid-loop. Record the first offending
@@ -319,13 +327,15 @@ int libsais_build_fm_index(const char* prefix, int64_t pac_len,
     std::unique_ptr<int64_t[]> sa64;
     std::unique_ptr<int32_t[]> sa32;
     if (!use_int64_sa) {
-        sa32.reset(new int32_t[(size_t)(N + 1 + fs)]);
+        sa32.reset(new (std::nothrow) int32_t[(size_t)(N + 1 + fs)]);
+        if (!sa32) err_fatal(__func__, "out of memory: %lld bytes for the 32-bit suffix array", (long long)((N + 1 + fs) * (int64_t)sizeof(int32_t)));
         int32_t rc = libsais_gsa_omp(buf_ptr, sa32.get(),
                                      (int32_t)(N + 1), (int32_t)fs,
                                      /*freq=*/nullptr, T);
         if (rc != 0) err_fatal(__func__, "libsais_gsa_omp failed (rc=%d)", rc);
     } else {
-        sa64.reset(new int64_t[(size_t)(N + 1 + fs)]);
+        sa64.reset(new (std::nothrow) int64_t[(size_t)(N + 1 + fs)]);
+        if (!sa64) err_fatal(__func__, "out of memory: %lld bytes for the 64-bit suffix array", (long long)((N + 1 + fs) * (int64_t)sizeof(int64_t)));
         int64_t rc = libsais64_gsa_omp(buf_ptr, sa64.get(),
                                        N + 1, fs,
                                        /*freq=*/nullptr, T);
