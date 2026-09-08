@@ -140,6 +140,19 @@ static int parse_full_double(const char *s, double *out)
     return 0;
 }
 
+/* Round an insert-size double the way the -I option's (int) casts do, and
+ * reject any value the cast cannot represent -- (int) of an out-of-range (or
+ * non-finite) double is undefined behaviour. NaN/inf fail the range comparison
+ * as well, so this rejects them too. Returns 0 on success, -1 on rejection. */
+static int isize_round_to_int(double v, int *out)
+{
+    const double r = v + .499;
+    if (!(r >= (double)INT_MIN && r <= (double)INT_MAX))
+        return -1;
+    *out = (int)r;
+    return 0;
+}
+
 #if defined(__ARM_NEON) || defined(__aarch64__) || defined(APPLE_SILICON)
 /* ARM/Apple Silicon - no CPUID instruction, use system calls */
 
@@ -2213,7 +2226,10 @@ int main_mem(int argc, char *argv[])
                 e_ins_val = strtol(p + 1, &p, 10);
                 e_range = e_range || (errno == ERANGE);
             }
-            if (e_range || e_del_val < 1 || e_del_val > INT_MAX ||
+            // *p != 0 rejects a partial parse (trailing garbage, e.g. -E 5abc or
+            // -E 5,3x): the valid prefix must not be applied while the remainder
+            // is silently dropped.
+            if (e_range || *p != 0 || e_del_val < 1 || e_del_val > INT_MAX ||
                 e_ins_val < 1 || e_ins_val > INT_MAX) {
                 fprintf(stderr, "ERROR: -E gap-extension penalty must be a positive integer in 1..%d (got %s)\n",
                         INT_MAX, optarg);
@@ -2615,8 +2631,18 @@ int main_mem(int argc, char *argv[])
                 if (out_opened) fclose(aux.fp);
                 return 1;
             }
-            pes[1].high = (int)(pes[1].avg + 4. * pes[1].std + .499);
-            pes[1].low  = (int)(pes[1].avg - 4. * pes[1].std + .499);
+            // A mean/std large enough to push a computed bound past the int
+            // range makes the (int) casts UB (e.g. -I 3000000000 rounds to
+            // ~4.2e9); reject before casting rather than truncating to a
+            // garbage band.
+            if (isize_round_to_int(pes[1].avg + 4. * pes[1].std, &pes[1].high) != 0 ||
+                isize_round_to_int(pes[1].avg - 4. * pes[1].std, &pes[1].low) != 0) {
+                fprintf(stderr, "ERROR: -I mean/std imply an insert-size bound outside %d..%d (got %s)\n",
+                        INT_MIN, INT_MAX, optarg);
+                free(opt);
+                if (out_opened) fclose(aux.fp);
+                return 1;
+            }
             if (pes[1].low < 1) pes[1].low = 1;
             if (*p != 0 && ispunct(*p) && isdigit(p[1])) {
                 double hi = strtod(p+1, &p);
@@ -2626,7 +2652,12 @@ int main_mem(int argc, char *argv[])
                     if (out_opened) fclose(aux.fp);
                     return 1;
                 }
-                pes[1].high = (int)(hi + .499);
+                if (isize_round_to_int(hi, &pes[1].high) != 0) {
+                    fprintf(stderr, "ERROR: -I insert-size max must be in %d..%d (got %g)\n", INT_MIN, INT_MAX, hi);
+                    free(opt);
+                    if (out_opened) fclose(aux.fp);
+                    return 1;
+                }
             }
             if (*p != 0 && ispunct(*p) && isdigit(p[1])) {
                 double lo = strtod(p+1, &p);
@@ -2636,7 +2667,21 @@ int main_mem(int argc, char *argv[])
                     if (out_opened) fclose(aux.fp);
                     return 1;
                 }
-                pes[1].low = (int)(lo + .499);
+                if (isize_round_to_int(lo, &pes[1].low) != 0) {
+                    fprintf(stderr, "ERROR: -I insert-size min must be in %d..%d (got %g)\n", INT_MIN, INT_MAX, lo);
+                    free(opt);
+                    if (out_opened) fclose(aux.fp);
+                    return 1;
+                }
+            }
+            // Reject trailing garbage after the numeric fields (e.g. -I 300,50xy
+            // or -I 300,50,junk): apply all parsed fields or none, never a valid
+            // prefix with the remainder silently dropped.
+            if (*p != 0) {
+                fprintf(stderr, "ERROR: -I expects mean[,std[,max[,min]]] numeric values (got %s)\n", optarg);
+                free(opt);
+                if (out_opened) fclose(aux.fp);
+                return 1;
             }
         }
         else {
