@@ -33,10 +33,13 @@ Options:
                   1..16 (bare = 6, =0 = off); the value must be attached with '='.
                   Opt-in speedup, NOT byte-identical; enabled by --fast [off]
     --rescue-band INT  half-width (bp) of the band around the anchor diagonal, 1..1000000 [50]
-    --rescue-skip  skip the mate-rescue Smith-Waterman outright when no K-mer anchor
-                  clears the vote floor, instead of falling back to the full window.
-                  Requires --rescue-kmer. Drops rescues rather than shortening them,
-                  so it can lose alignments; NOT part of --fast [off]
+    --rescue-skip[=true|false]  skip the mate-rescue Smith-Waterman outright when
+                  no K-mer anchor clears the vote floor, instead of falling back to
+                  the full window. Bare = true; =false is the explicit opt-out; the
+                  value must be attached with '=' (--rescue-skip false leaves 'false'
+                  as a positional). When enabled, requires --rescue-kmer. Drops
+                  rescues rather than shortening them, so it can lose alignments;
+                  NOT part of --fast [off]
     -S            skip mate rescue
     -P            skip pairing; mate rescue performed unless -S also in use
     --hic         map Hi-C reads; equivalent to -5SP (note: -P alone still runs

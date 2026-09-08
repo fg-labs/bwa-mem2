@@ -377,6 +377,37 @@ for the recommended operating point.
 
 ---
 
+## `--rescue-skip` drop hopeless mate rescues
+
+`--rescue-skip` opts into declining a mate rescue outright when the best anchor
+diagonal clears neither an absolute vote floor nor a fraction of the distinct
+K-mers the anchor index holds for the query — a speed/recall trade rather than a
+byte-identical change. **Off by default**, and **not part of [`--fast`](../cli/mem.md#--fast--speed-preset-opt-in-not-byte-identical)**;
+combining them (`--fast --rescue-skip`) is supported and the `--fast` audit line
+then names it. It changes which reads map — a read the full-window SW would have
+rescued can now stay unmapped — so it is opt-in and **not byte-identical** when
+enabled.
+
+The flag takes an *optional* `true|false` argument, mirroring the
+`--rescue-kmer[=K]` idiom:
+
+- Bare `--rescue-skip` or `--rescue-skip=true` **enables** it.
+- `--rescue-skip=false` is the explicit **opt-out** (the default behavior).
+- Only `true|false` are accepted — any other value is a hard error.
+- The value must be attached with `=`. A space-separated `--rescue-skip false`
+  orphans `false` into a positional argument and is reported with a diagnostic
+  pointing at the `=` form, rather than silently enabling the skip.
+
+When enabled, it **requires `--rescue-kmer`**: the decision reuses that anchor
+scan, so `--rescue-skip` (or `--rescue-skip=true`) with `--rescue-kmer=0` is
+rejected rather than silently ignored. `--rescue-skip=false` needs no anchor scan
+and so carries no such requirement.
+
+See [CLI → mem `--rescue-skip`](../cli/mem.md#--rescue-skip--drop-hopeless-mate-rescues-opt-in-not-byte-identical)
+for the full speed/recall characterization.
+
+---
+
 ## `--seed-order` seed reordering before chaining
 
 `--seed-order <mode>` reorders each read's SA-resolved seeds before chaining. The default
@@ -511,6 +542,7 @@ exact full-width ladder (the certificate is a non-meth optimization).
 | `--dedup` extension-DP job deduplication | [#415](https://github.com/fg-labs/bwa-mem3/pull/415) | — | fork-only (on by default via `auto`; alignment records byte-identical in every mode; headers excluded) |
 | `--dedup-reads` whole-read-pair memoization | [#433](https://github.com/fg-labs/bwa-mem3/pull/433) | — | fork-only (on by default via `auto`; alignment records byte-identical in every mode; collapses duplicate read-pairs within a `-K` chunk) |
 | `--min-ext-len` short-seed extension filter | _pending_ | — | fork-only (opt-in, off by default) |
+| `--rescue-skip[=true\|false]` drop hopeless mate rescues | [#349](https://github.com/fg-labs/bwa-mem3/pull/349), [#472](https://github.com/fg-labs/bwa-mem3/pull/472) | — | fork-only (opt-in, off by default; not byte-identical when enabled; `=false` opt-out requires no `--rescue-kmer`) |
 | `--seed-order` seed reordering | [#186](https://github.com/fg-labs/bwa-mem3/pull/186) | — | fork-only (opt-in, off by default) |
 | `--skip-contained-ext` contained-seed extension skip | [#192](https://github.com/fg-labs/bwa-mem3/pull/192) | — | fork-only (opt-in, byte-identical on short/medium non-meth reads, **not** byte-identical on kilobase-scale long reads, no-op under --meth) |
 | `--max-extend-chains` chain-extension cap | [#193](https://github.com/fg-labs/bwa-mem3/pull/193) | — | fork-only (opt-in, not byte-identical) |

@@ -489,8 +489,15 @@ distinct codes, so the denominator is the read's full distinct-K-mer count only 
 point — which at short-read lengths it always is, since a 150 bp read yields only ~145
 6-mers in total. Removing SWs is a larger saving than shortening them.
 
-Requires `--rescue-kmer` — the decision reuses the same anchor scan, so `--rescue-skip`
-with `--rescue-kmer=0` is rejected rather than silently ignored.
+`--rescue-skip` takes an *optional* `true|false` argument: bare `--rescue-skip` (or
+`--rescue-skip=true`) enables it, and `--rescue-skip=false` is the explicit opt-out. As with
+`--rescue-kmer`, the value must be attached with `=` — `--rescue-skip false` leaves `false` as a
+positional argument (reported with a diagnostic pointing at the `=` form, not silently enabling the
+skip). Only `true|false` are accepted.
+
+When enabled, requires `--rescue-kmer` — the decision reuses the same anchor scan, so
+`--rescue-skip` (or `--rescue-skip=true`) with `--rescue-kmer=0` is rejected rather than silently
+ignored. `--rescue-skip=false` needs no anchor scan, so it carries no such requirement.
 
 **This changes which reads map, not just their MAPQ, and it costs recall.** A read the
 full-window SW would have rescued can now stay unmapped. Measured against `--rescue-kmer`

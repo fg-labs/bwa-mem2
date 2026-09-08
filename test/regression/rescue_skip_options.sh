@@ -20,6 +20,10 @@
 #   * --rescue-skip alone                -> hard error
 #   * --rescue-skip --rescue-kmer=0      -> hard error, either order
 #   * --rescue-skip --rescue-kmer=6      -> accepted, either order
+#   * --rescue-skip=false                -> accepted, needs no anchor scan (off)
+#   * --rescue-skip=true --rescue-kmer=6 -> accepted; =true without it -> error
+#   * --rescue-skip=bogus / =1           -> hard error (surface is exactly true|false)
+#   * --rescue-skip false (space form)   -> stray-value diagnostic, not silent enable
 #   * --fast                             -> does NOT enable it (opt-in only)
 #   * --fast --rescue-skip                -> accepted, named on the audit line
 #   * --fast --rescue-kmer=0             -> accepted, clean no-op
@@ -107,19 +111,47 @@ accept "--rescue-kmer=6" "--rescue-skip"
 accept "--rescue-skip" "--rescue-kmer=6"
 accept "--rescue-skip" "--rescue-kmer" # bare --rescue-kmer resolves to the default K
 
-# --- --rescue-skip takes no argument ----------------------------------------
-# `--rescue-skip=1` must not be quietly accepted: the option is a plain switch,
-# and getopt_long rejects an argument supplied to a no_argument long option.
-set +e
-run "--rescue-skip=1" "--rescue-kmer=6"
-rc=$?
-set -e
-if [[ "$rc" -eq 0 ]]; then
-    echo "FAIL: '--rescue-skip=1' was accepted; the option takes no argument"
-    fails=$((fails + 1))
-else
-    echo "  ok: '--rescue-skip=1' rejected (the option takes no argument)"
-fi
+# --- --rescue-skip[=true|false]: optional true|false argument ----------------
+# The flag takes an OPTIONAL true|false value (bare = true). =false is the
+# explicit opt-out and, being off, needs no anchor scan; =true behaves like the
+# bare form and still requires --rescue-kmer. Any other value hard-errors, and
+# the value must be attached with '=' -- a space-separated `--rescue-skip false`
+# orphans `false` into a positional, caught by the stray-value diagnostic rather
+# than silently enabling the skip.
+
+# Reject with a specific diagnostic: exit non-zero AND the message present.
+reject_with() {
+    local want=$1
+    shift
+    local rc
+    set +e
+    run "$@"
+    rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+        echo "FAIL: '$*' was accepted; expected a non-zero exit"
+        fails=$((fails + 1))
+    elif ! grep -qF "$want" "$err"; then
+        echo "FAIL: '$*' exited $rc but without the expected diagnostic ('$want')"
+        cat "$err" >&2
+        fails=$((fails + 1))
+    else
+        echo "  ok: '$*' rejected"
+    fi
+}
+
+accept "--rescue-skip=false"                  # off: no anchor scan needed
+accept "--rescue-skip=true" "--rescue-kmer=6" # on, explicit
+reject "--rescue-skip=true"                   # on without --rescue-kmer -> requires it
+# A malformed value hard-errors, naming the accepted vocabulary. 1/0 are NOT
+# aliases (the surface is exactly true|false).
+reject_with "accepts true|false" "--rescue-skip=bogus"
+reject_with "accepts true|false" "--rescue-skip=1"
+# The value must be attached with '='. A space form orphans 'false' into a
+# positional; the stray-value diagnostic points at the '=' form rather than
+# silently enabling the skip and swallowing 'false' as <idxbase>.
+reject_with "write --rescue-skip=false, not --rescue-skip false" \
+    "--rescue-skip" "false" "--rescue-kmer=6"
 
 # --- interaction with --fast -------------------------------------------------
 # --rescue-skip is deliberately NOT in --fast: it drops rescues rather than

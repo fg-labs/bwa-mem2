@@ -1461,6 +1461,7 @@ static const char *stray_option_value_flag(const char *s)
         { "none",      "--meth-tags"    },
         { "spec30",    "--meth-seed-prune" }, { "baseline",  "--meth-seed-prune" },
         { "off",       "--meth-seed-prune" },
+        { "true",      "--rescue-skip"  }, { "false",     "--rescue-skip" },
     };
     if (s == NULL) return NULL;
     /* A `^`-prefixed exclusion can only have come from --meth-tags. Its `-XM`
@@ -1486,6 +1487,9 @@ static const char *stray_option_value_advice(const char *s)
     if (strcmp(flag, "--meth-seed-prune") == 0)
         return "       --meth-seed-prune takes an OPTIONAL argument, which getopt only binds with '=':\n"
                "       write --meth-seed-prune=baseline, not --meth-seed-prune baseline.";
+    if (strcmp(flag, "--rescue-skip") == 0)
+        return "       --rescue-skip takes an OPTIONAL argument, which getopt only binds with '=':\n"
+               "       write --rescue-skip=false, not --rescue-skip false.";
     return "       Pass it as the argument to that flag, e.g. --meth-scoring genomic.";
 }
 
@@ -1529,10 +1533,13 @@ static void usage(const mem_opt_t *opt)
     fprintf(stderr, "                  Opt-in speedup, NOT byte-identical; enabled by --fast [off]\n");
     fprintf(stderr, "    --rescue-band INT  half-width (bp) of the band around the anchor diagonal, 1..%d [%d]\n",
             MEM_RESCUE_BAND_MAX, opt->rescue_band);
-    fprintf(stderr, "    --rescue-skip  skip the mate-rescue Smith-Waterman outright when no K-mer anchor\n");
-    fprintf(stderr, "                  clears the vote floor, instead of falling back to the full window.\n");
-    fprintf(stderr, "                  Requires --rescue-kmer. Drops rescues rather than shortening them,\n");
-    fprintf(stderr, "                  so it can lose alignments; NOT part of --fast [off]\n");
+    fprintf(stderr, "    --rescue-skip[=true|false]  skip the mate-rescue Smith-Waterman outright when\n");
+    fprintf(stderr, "                  no K-mer anchor clears the vote floor, instead of falling back to\n");
+    fprintf(stderr, "                  the full window. Bare = true; =false is the explicit opt-out; the\n");
+    fprintf(stderr, "                  value must be attached with '=' (--rescue-skip false leaves 'false'\n");
+    fprintf(stderr, "                  as a positional). When enabled, requires --rescue-kmer. Drops\n");
+    fprintf(stderr, "                  rescues rather than shortening them, so it can lose alignments;\n");
+    fprintf(stderr, "                  NOT part of --fast [off]\n");
     fprintf(stderr, "    -S            skip mate rescue\n");
     fprintf(stderr, "    -P            skip pairing; mate rescue performed unless -S also in use\n");
     fprintf(stderr, "    --hic         map Hi-C reads; equivalent to -5SP (note: -P alone still runs\n");
@@ -1963,7 +1970,7 @@ int main_mem(int argc, char *argv[])
         {"cohort-slices",            required_argument, 0, OPT_COHORT_SLICES},
         {"rescue-kmer",              optional_argument, 0, OPT_RESCUE_KMER},
         {"rescue-band",              required_argument, 0, OPT_RESCUE_BAND},
-        {"rescue-skip",              no_argument,       0, OPT_RESCUE_SKIP},
+        {"rescue-skip",              optional_argument, 0, OPT_RESCUE_SKIP},
         {"cohort-ramp-ratio",        required_argument, 0, OPT_COHORT_RAMP_RATIO},
         {"cohort-ramp-first",        required_argument, 0, OPT_COHORT_RAMP_FIRST},
         {"extend-tie-frac",          required_argument, 0, OPT_EXTEND_TIE_FRAC},
@@ -2425,13 +2432,30 @@ int main_mem(int argc, char *argv[])
             opt->rescue_band = (int)band;
         }
         else if (c == OPT_RESCUE_SKIP) {
-            /* A plain switch: there is no `=0` form because there is no preset to
-             * opt out of -- --fast deliberately does not enable this. Validated
-             * AFTER getopt (below), not here: it needs a non-zero rescue_kmer,
-             * but --rescue-kmer may not be parsed yet and --fast resolves it
-             * later still, so an inline check would make the diagnostic depend
-             * on flag order. */
-            opt->rescue_skip = 1;
+            /* Optional true|false, mirroring --rescue-kmer[=K]: bare = true (the
+             * historical no-argument switch), =false is the explicit opt-out.
+             * Today the default is already off and --fast does not enable this,
+             * so =false is only load-bearing once a preset turns rescue-skip on
+             * -- but it completes the interface and is the escape hatch a future
+             * --fast promotion would require, so it is worth having now.
+             * Validated AFTER getopt (below), not here: enabling it needs a
+             * non-zero rescue_kmer, but --rescue-kmer may not be parsed yet and
+             * --fast resolves it later still, so an inline check would make the
+             * diagnostic depend on flag order. (=false never needs rescue_kmer,
+             * and the post-getopt check is guarded on rescue_skip being set.) */
+            int v = 1;   /* bare --rescue-skip enables */
+            if (optarg) {
+                if      (!strcmp(optarg, "true"))  v = 1;
+                else if (!strcmp(optarg, "false")) v = 0;
+                else {
+                    fprintf(stderr, "ERROR: --rescue-skip accepts true|false "
+                                    "(bare = true), got '%s'\n", optarg);
+                    free(opt);
+                    if (out_opened) fclose(aux.fp);
+                    return 1;
+                }
+            }
+            opt->rescue_skip = v;
             opt0.rescue_skip = 1;
         }
         else if (c == OPT_CHUNK_CAP) {
