@@ -2732,7 +2732,6 @@ void mem_chain_seeds(FMI_search *fmi, const mem_opt_t *opt,
         } while (pos < num_smem - 1 && matchArray[pos].rid == matchArray[pos + 1].rid);
         l_rep += e - b;
 
-        // bwt_sa
         // assert(pos - smem_ptr + 1 < 6000);
         /* sa_across grows sa_coord per chunk below; a grow here would move the
          * buffer out from under the chunk it already filled. */

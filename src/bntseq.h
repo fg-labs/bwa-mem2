@@ -77,7 +77,7 @@ typedef struct {
 	 *
 	 * Derived from anns[].offset and NOT serialized. Both ends uphold that:
 	 * every writer that copies this struct wholesale detaches the pointer
-	 * first so the image carries NULL (bwa_shm_pack_into, bwa_idx2mem), and
+	 * first so the image carries NULL (bwa_shm_pack_into), and
 	 * every restore path that memcpy's it back (shm attach, mem-blob restore)
 	 * resets this to NULL and rebuilds via bns_build_pos2rid before the first
 	 * lookup. The reader-side reset is deliberately unconditional rather than
