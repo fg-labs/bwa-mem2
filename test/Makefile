@@ -45,14 +45,22 @@ else
     LIBS     ?= -L.. -fopenmp -lbwa ../ext/libsais/src/libsais.o ../ext/libsais/src/libsais64.o -lz ../ext/htslib/libhts.a -lpthread
 endif
 
-# Inherit htslib's transitive deps from the parent Makefile so libhts.a's
-# libdeflate (and any other configure-autodetected feature) symbols
-# resolve at link time. The parent's `test-binaries` recipe propagates
-# HTSLIB_static_LIBS / HTSLIB_static_LDFLAGS as command-line overrides.
-# Both default to empty when this Makefile is invoked standalone, in
-# which case the link will fail the same way the parent's would without
-# the parent's htslib_static.mk include block -- see the parent Makefile
-# for the mechanism.
+# Inherit htslib's transitive deps so libhts.a's libdeflate (and any other
+# configure-autodetected feature) symbols resolve at link time. Two paths feed
+# these in, and both must work because CI links this binary both ways:
+#
+#   - Via the parent's `test-binaries` recipe, which passes HTSLIB_static_LIBS /
+#     HTSLIB_static_LDFLAGS as command-line overrides. A command-line
+#     assignment wins over the `-include` below, so that path is unchanged.
+#   - Standalone (e.g. `cd test && make` from test/run_unit_tests.sh, or a bare
+#     `make` that relinks a stale unit binary after the parent rebuilt
+#     libbwa.a). Here no override is passed, so we pull the same generated
+#     htslib_static.mk the parent uses. Without this, a standalone relink drops
+#     -ldeflate/-lz/-lm and fails on htslib's unresolved libdeflate_* symbols.
+#
+# htslib_static.mk is generated when the parent builds libhts.a; `-include`
+# silently no-ops on a never-built tree, preserving the prior behavior there.
+-include ../ext/htslib/htslib_static.mk
 LIBS    += $(HTSLIB_static_LIBS)
 LDFLAGS += $(HTSLIB_static_LDFLAGS)
 
