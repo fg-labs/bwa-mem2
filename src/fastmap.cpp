@@ -3852,6 +3852,11 @@ int main_mem(int argc, char *argv[])
     meth_orig_ref_free_handles(&aux);
     delete(aux.fmi);
 
+    /* Release the read-memo module scratch (role[]/rep_pair[]/chain buffers).
+     * Reached only after the worker pipeline has joined, so no live thread can
+     * touch it; without this the one-shot buffers stay reachable-but-unfreed. */
+    mem_readmemo_teardown();
+
     /* Display runtime profiling stats */
     tprof[MEM][0] = __rdtsc() - tprof[MEM][0];
     display_stats(nt);

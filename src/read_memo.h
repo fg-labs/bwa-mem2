@@ -107,6 +107,12 @@ int read_memo_active(void);
  * when the env knob is set; production runs it off. Returns 1 if set. */
 int read_memo_verify(void);
 
+/* Shutdown teardown for the module's grown-in-place scratch (call after worker
+ * threads join). read_memo_state_free releases a state's role[]/rep_pair[];
+ * read_memo_teardown releases the module-scope chain scratch. Both idempotent. */
+void read_memo_state_free(read_memo_state *st);
+void read_memo_teardown(void);
+
 /* Test-only: reset the process-global controller + stats to their initial
  * (unlatched, MEASURING) state so a unit test does not depend on prior state or
  * case ordering. Not used in production. */

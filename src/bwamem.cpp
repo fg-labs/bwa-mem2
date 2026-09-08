@@ -3824,6 +3824,21 @@ void mem_pair_and_emit_cohort(mem_opt_t *opt,
             __func__, n, cputime() - ctime, realtime() - rtime);
 }
 
+/* Grown-in-place across mem_process_seqs invocations (sized from the pair
+ * count); a single instance for the process. File scope (was a function-local
+ * static) so mem_readmemo_teardown() can release it at shutdown -- otherwise its
+ * role[]/rep_pair[] buffers stay reachable-but-unfreed at exit. */
+static read_memo_state g_readmemo_state = { 0, NULL, NULL, 0 };
+
+/* Release the read-memo module scratch (this state's buffers + the module chain
+ * scratch). Call once from the aligner teardown after the worker pipeline has
+ * finished; idempotent. */
+void mem_readmemo_teardown(void)
+{
+    read_memo_state_free(&g_readmemo_state);
+    read_memo_teardown();
+}
+
 void mem_process_seqs(mem_opt_t *opt,
                       int64_t n_processed,
                       int n,
@@ -3863,7 +3878,8 @@ void mem_process_seqs(mem_opt_t *opt,
      * EXIT GATE: a regression pinning `--dedup-reads off == on == auto == baseline`
      * SAM byte-identity (compat_byte_identical.sh / cohort_slice_identity.sh
      * style), plus the BWAMEM3_DEDUP_READS_VERIFY regs-invariance instrument. */
-    static read_memo_state g_readmemo_state = { 0, NULL, NULL, 0 };
+    /* g_readmemo_state is now file-scope (see above) so it can be freed at
+     * shutdown by mem_readmemo_teardown(); same single-instance lifetime. */
     read_memo_result rm_r; bool rm_measure = false, rm_arm = false;
     /* VERIFY (BWAMEM3_DEDUP_READS_VERIFY) is a correctness instrument, not a
      * memoization mode: it must run whenever the prepass can identify DUP pairs,
