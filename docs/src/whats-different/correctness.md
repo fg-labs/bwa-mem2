@@ -263,6 +263,37 @@ kernel and passes on the fixed one.
 
 ---
 
+## `--meth` SEQ restore clamps unsupported bytes to `N` (PR #463)
+
+In `--meth` mode the original read sequence is restored into the emitted BAM `SEQ`
+field along one of four branches, chosen by whether the pre-c2t original sequence
+(`meth_orig_seq`, else the `YS:Z` comment) is available and by the read's orientation:
+
+- **Forward, original sequence available** — the bytes are copied directly from the
+  original sequence (only lowercase folded to uppercase); they do **not** pass through
+  `nst_nt4_table`, so a `-` on this path is emitted verbatim as `-`.
+- **Reverse, original sequence available**, plus both **fallback paths** (original
+  sequence missing, restoring from `s->seq`, forward and reverse) — each ASCII base is
+  mapped through `nst_nt4_table` and used to index a five-character string literal
+  (`"ACGTN"` / `"TGCAN"`, indices 0–4).
+
+`nst_nt4_table` maps `A/C/G/T/N` (and their lowercase forms) to `0..4` and every
+unrecognized byte to `4` — with one exception: `-` maps to `5`. Index `5` selects the
+literal's terminating NUL, so on the three lookup-based paths a `-` emitted a `'\0'`
+into `SEQ`: an in-bounds read of the string terminator, but corrupt output rather than an
+out-of-bounds access. The fix clamps any index `>= 4` to `4`, so on those paths a `-`
+now emits `N`.
+
+This is scoped to **`--meth` mode only**. On the lookup-based paths the clamp changes
+output **only for a `-` byte** — the single input that maps to `5` — which now renders
+as `N` instead of a corrupt NUL; every other byte already resolved to an index in
+`0..4`, so its output is unchanged. That equivalence is **by construction** — the clamp
+alters the result solely for the `bi == 5` case — not a measured-fixture generalization;
+standard fixtures do not exercise the `-` input. The direct-copy forward path (where a
+`-` stays `-`) and the default (non-`--meth`) output are unaffected.
+
+---
+
 ## Changes catalog
 
 | Item | bwa-mem3 PR | Upstream PR/issue | Status |
@@ -279,6 +310,7 @@ kernel and passes on the fixed one.
 | 8-bit banded-SW envelope cap at `w = 124` | [#422](https://github.com/fg-labs/bwa-mem3/pull/422) | — | fork-only (only affects `-w >= 125`; default `-w 100` byte-identical) |
 | Vector banded-SW z-drop gate at `-d 0` | [#424](https://github.com/fg-labs/bwa-mem3/pull/424) | — | fork-only (z-drop-disabled only; default `-d 100` byte-identical) |
 | 16-bit banded-SW per-lane band clamp (wide arithmetic) | [#423](https://github.com/fg-labs/bwa-mem3/pull/423) | — | fork-only (non-default scoring only; default path unchanged — see the correctness note above) |
+| `--meth` SEQ restore clamps unsupported bytes to `N` | [#463](https://github.com/fg-labs/bwa-mem3/pull/463) | — | fork-only (`--meth` only; changes a `-` byte to `N` on the `nst_nt4_table` lookup paths only — the direct-copy forward path, all other bytes, and the default path are unchanged) |
 | kseq2bseq1 zero-initialization | [#22](https://github.com/fg-labs/bwa-mem3/pull/22) | — | fork-only |
 | Proper-pair flag from emitted alignment | [#17](https://github.com/fg-labs/bwa-mem3/pull/17) | — | fork-only, **opt-in** (`--proper-pair-from-emitted`; default matches both upstreams, [#362](https://github.com/fg-labs/bwa-mem3/issues/362)) |
 

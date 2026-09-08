@@ -451,7 +451,12 @@ int meth_mem_aln_to_bam(bam1_t *b,
             } else {
                 for (size_t i = 0; i < l_emit; ++i) {
                     unsigned char c = (unsigned char)orig_seq[qe - 1 - (int)i];
-                    seq_text[i] = "TGCAN"[nst_nt4_table[c]];
+                    /* nst_nt4_table maps '-' to 5, which indexes the literal's
+                     * NUL terminator (in bounds, but emits '\0' into SEQ --
+                     * corrupt output, not an OOB read); clamp anything >=4 to N.
+                     * Byte-identical for A/C/G/T/N. */
+                    int bi = nst_nt4_table[c];
+                    seq_text[i] = "TGCAN"[bi < 4 ? bi : 4];
                 }
             }
         } else if (!p.is_rev) {
@@ -459,12 +464,14 @@ int meth_mem_aln_to_bam(bam1_t *b,
              * (post-c2t in meth mode); map ASCII → 0..4 via nst_nt4_table. */
             for (size_t i = 0; i < l_emit; ++i) {
                 unsigned char c = (unsigned char)s->seq[qb + (int)i];
-                seq_text[i] = "ACGTN"[nst_nt4_table[c]];
+                int bi = nst_nt4_table[c];
+                seq_text[i] = "ACGTN"[bi < 4 ? bi : 4];
             }
         } else {
             for (size_t i = 0; i < l_emit; ++i) {
                 unsigned char c = (unsigned char)s->seq[qe - 1 - (int)i];
-                seq_text[i] = "TGCAN"[nst_nt4_table[c]];
+                int bi = nst_nt4_table[c];
+                seq_text[i] = "TGCAN"[bi < 4 ? bi : 4];
             }
         }
         seq_text[l_emit] = '\0';
