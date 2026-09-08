@@ -77,6 +77,8 @@ static inline void fr_rec_to_bseq1(const fr_fastq_rec_t *r, bseq1_t *s, read_are
         err_fatal(__func__, "sequence of %zu bases exceeds the supported read length (%d)", r->seq_l, INT_MAX);
     s->seq     = read_arena_dup(arena, r->seq, r->seq_l);
     s->qual    = r->qual_l ? read_arena_dup(arena, r->qual, r->qual_l) : 0;
+    /* seq_l is validated (<= INT_MAX) by the caller before this runs, so the
+     * narrowing is safe -- see the guard in bseq_read_fast. */
     s->l_seq   = (int)r->seq_l;
 }
 
@@ -113,7 +115,7 @@ bseq1_t *bseq_read_fast(int64_t chunk_size, int *n_, void *ks1_, void *ks2_, int
         int g2 = (g1 == 1 && p2) ? fr_fastq_next(p2, &r2) : 0;
         if (sp_enabled()) {
             double d, c; sp_read_get(&d, &c, NULL);
-            sp_read_add(2, (sp_wall() - _tk0) - ((d + c) - _io0));
+            sp_read_add(SP_READ_PARSE, (sp_wall() - _tk0) - ((d + c) - _io0));
         }
         if (g1 == -2)
             err_fatal(__func__, "malformed FASTQ record or read/decode error in the 1st input (record %ld)", (long)n);
@@ -124,6 +126,15 @@ bseq1_t *bseq_read_fast(int64_t chunk_size, int *n_, void *ks1_, void *ks2_, int
             fprintf(stderr, "[W::%s] the 2nd file has fewer sequences.\n", __func__);
             break;
         }
+        /* Reject a >=2 GiB record before it is copied or narrowed: l_seq is an
+         * int and the capacity/chunk-budget math below is all int, so a negative
+         * l_seq would corrupt the batch. Validated here -- before fr_rec_to_bseq1
+         * carves the sequence into the arena -- with the record index and mate
+         * side, matching the other err_fatal call sites in this file. */
+        if (r1.seq_l > (size_t)INT_MAX)
+            err_fatal(__func__, "sequence of %zu bases in the 1st input (record %ld) exceeds the supported read length", r1.seq_l, (long)n);
+        if (p2 && r2.seq_l > (size_t)INT_MAX)
+            err_fatal(__func__, "sequence of %zu bases in the 2nd input (record %ld) exceeds the supported read length", r2.seq_l, (long)n);
         /* Capacity check for BOTH writes this iteration. In paired-end mode `n`
          * advances by two and the loop writes seqs[n] and seqs[n+1], but the
          * initial estimate below can be odd (an odd chunk_size/seq_l quotient),
@@ -143,6 +154,17 @@ bseq1_t *bseq_read_fast(int64_t chunk_size, int *n_, void *ks1_, void *ks2_, int
                  * byte-identical. */
                 int64_t est = r1.seq_l > 0 ? chunk_size / (int64_t)r1.seq_l : 256;
                 est += 256;   /* slack for the even-parity tail + estimate error */
+                /* Clamp: a very short first record (e.g. 1 base) would size the
+                 * estimate from chunk_size alone and reserve ~chunk_size entries
+                 * up front -- orders of magnitude past what the batch holds
+                 * (~chunk_size * sizeof(bseq1_t), hundreds of MB at the default
+                 * chunk). A realistic batch fits well under 1<<20 records (the
+                 * default ~10 Mbase chunk holds ~100k 100 bp reads, ~500k 20 bp
+                 * reads), so this only trips on a degenerate short first read; a
+                 * genuinely larger batch (a big -K with short reads) still grows
+                 * via the doubling path below at the cost of a few reallocs.
+                 * Capacity only -> byte-identical. */
+                if (est > (1 << 20)) est = 1 << 20;
                 m = est < 256 ? 256 : est;
             } else {
                 m <<= 1;
@@ -166,7 +188,7 @@ bseq1_t *bseq_read_fast(int64_t chunk_size, int *n_, void *ks1_, void *ks2_, int
             seqs[n].id = n;
             size += seqs[n++].l_seq;
         }
-        if (sp_enabled()) sp_read_add(2, sp_wall() - _tp);
+        if (sp_enabled()) sp_read_add(SP_READ_PARSE, sp_wall() - _tp);
         if (size >= chunk_size && (n & 1) == 0) break;   /* even-parity cut, all modes */
     }
     if (size == 0) {                                      /* 1st file has fewer */

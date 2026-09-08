@@ -119,7 +119,9 @@ static __thread double tl_disk = 0.0, tl_dec = 0.0, tl_parse = 0.0;
 static __thread long   tl_fdbytes = 0, tl_blocks = 0;
 void sp_read_reset(void) { tl_disk = tl_dec = tl_parse = 0.0; tl_fdbytes = 0; tl_blocks = 0; }
 void sp_read_add(int which, double s) {
-    if (which == 0) tl_disk += s; else if (which == 1) tl_dec += s; else tl_parse += s;
+    if (which == SP_READ_DISKWAIT) tl_disk += s;
+    else if (which == SP_READ_DECOMPRESS) tl_dec += s;
+    else tl_parse += s;   /* SP_READ_PARSE */
 }
 void sp_read_get(double *d, double *c, double *p) {
     if (d) *d = tl_disk; if (c) *c = tl_dec; if (p) *p = tl_parse;

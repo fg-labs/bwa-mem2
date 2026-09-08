@@ -105,6 +105,53 @@ static void check(const char *label, int copy_comment, int paired, const char *e
     if (p2) { unlink(p2); free(p2); }
 }
 
+/* Drive the readno-suffix trim (fr_trim_readno_len) through the adapter, which
+ * fr_fastq_diff_test never does (the parser doesn't trim). Boundaries: a bare
+ * trailing "/<digit>" is stripped ("a/1" -> "a"), but a name too short to have
+ * anything before the suffix is kept ("/1", length 2, l>2 guard fails), and a
+ * "/<non-digit>" is kept ("r/x"). */
+static void check_trim(void)
+{
+    static const char *P =
+        "@a/1\nAC\n+\nII\n"
+        "@/1\nGT\n+\nFF\n"
+        "@r/x\nTT\n+\nGG\n";
+    static const char *EXPECT[3] = { "a", "/1", "r/x" };
+
+    char *path = strdup("/tmp/bseq_trim_XXXXXX");
+    int fd = mkstemp(path); assert(fd >= 0);
+    size_t len = strlen(P), off = 0;
+    while (off < len) { ssize_t w = write(fd, P + off, len - off); assert(w > 0); off += (size_t)w; }
+    close(fd);
+
+    int rfd = open(path, O_RDONLY); assert(rfd >= 0);
+    const char *err = NULL;
+    fast_reader_t *fr = fast_reader_dopen(rfd, &err);
+    void *ks = fast_kseq_init(fr);
+    int n = 0; int64_t size = 0;
+    read_arena_t *arena = NULL;
+    bseq1_t *seqs = bseq_read_fast(1 << 20, &n, ks, NULL, &size, &arena, 0);
+
+    int ok = (n == 3);
+    if (!ok) fprintf(stderr, "    trim: record count %d (expected 3)\n", n);
+    for (int i = 0; i < n && ok; i++) {
+        if (strcmp(seqs[i].name, EXPECT[i]) != 0) {
+            ok = 0;
+            fprintf(stderr, "    trim: rec %d name='%s' (expected '%s')\n",
+                    i, seqs[i].name, EXPECT[i]);
+        }
+    }
+    fprintf(stderr, "%s: readno-suffix trim boundaries\n", ok ? "ok  " : "FAIL");
+    if (!ok) g_fail = 1;
+
+    for (int i = 0; i < n; i++) free(seqs[i].comment);
+    free(seqs);
+    if (arena) read_arena_destroy(arena);
+    fast_kseq_destroy(ks);
+    fast_reader_close(fr);
+    unlink(path); free(path);
+}
+
 int main(void)
 {
     /* copy_comment=1 → present comment copied through; absent stays NULL. */
@@ -113,6 +160,8 @@ int main(void)
     /* copy_comment=0 → comment dropped to NULL even when the record had one. */
     check("SE copy_comment=0", 0, 0, NULL);
     check("PE copy_comment=0", 0, 1, NULL);
+
+    check_trim();
 
     fprintf(stderr, "\n%s\n", g_fail ? "COMMENT-COPY TEST FAILED" : "ALL COMMENT-COPY CASES OK");
     return g_fail ? 1 : 0;

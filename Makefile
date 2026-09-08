@@ -1037,7 +1037,7 @@ ifeq ($(UNAME_S),Darwin)
         FAST_READER_TEST_LIB += -L$(ZLIBNG_PREFIX)/lib
     endif
 endif
-fast_reader_selftest: src/fast_reader.c test/fast_reader_selftest.c $(FAST_READER_TEST_DEP)
+fast_reader_selftest: src/fast_reader.c test/fast_reader_selftest.c test/gz_test_util.h $(FAST_READER_TEST_DEP)
 	$(CC) -O2 -Wall -Wextra $(FAST_READER_TEST_INC) test/fast_reader_selftest.c src/fast_reader.c $(FAST_READER_TEST_LIB) -lz $(FAST_READER_TEST_ZLIBNG) -ldeflate -o $@
 
 # Differential test: fr_fastq vs kseq, byte-identical record parsing. Links only
@@ -1063,6 +1063,14 @@ bseq_read_pe_oob_test: src/fr_fastq.c src/fast_reader.c src/fast_reader_bseq.c t
 # is covered by fr_fastq_diff_test; this drives the adapter. Reader TUs only.
 bseq_read_comment_copy_test: src/fr_fastq.c src/fast_reader.c src/fast_reader_bseq.c test/bseq_read_comment_copy_test.c $(FAST_READER_TEST_DEP)
 	$(CC) -O2 -Isrc -Wall -Wextra $(FAST_READER_TEST_INC) test/bseq_read_comment_copy_test.c src/fr_fastq.c src/fast_reader.c src/fast_reader_bseq.c $(FAST_READER_TEST_LIB) -lz $(FAST_READER_TEST_ZLIBNG) -ldeflate -o $@
+
+# Regression: bseq_read_fast must abort (err_fatal), not swallow a truncated
+# gzip member as clean EOF. Drives the full fast_reader -> fr_fastq ->
+# bseq_read_fast chain over a mid-member-truncated .fq.gz; the forked child must
+# die by SIGABRT rather than reach a clean n==0 EOF. Reader TUs only (no
+# bwa-mem3 build), like bseq_read_comment_copy_test. Built and run in ci.yml.
+bseq_read_truncated_gzip_test: src/fr_fastq.c src/fast_reader.c src/fast_reader_bseq.c test/bseq_read_truncated_gzip_test.c test/gz_test_util.h $(FAST_READER_TEST_DEP)
+	$(CC) -O2 -Isrc -Wall -Wextra $(FAST_READER_TEST_INC) test/bseq_read_truncated_gzip_test.c src/fr_fastq.c src/fast_reader.c src/fast_reader_bseq.c $(FAST_READER_TEST_LIB) -lz $(FAST_READER_TEST_ZLIBNG) -ldeflate -o $@
 # kvec_alloc_fail_test -- forces the backing realloc to fail and asserts kvec.h's
 # growth macros abort loudly (SIGABRT + an out-of-memory diagnostic) instead of
 # leaking the old buffer and writing through the NULL that realloc returns.
