@@ -261,6 +261,35 @@ only when either side reports `gscore > 0` (a to-end alignment is observable),
 across the wrap scoring sets on NEON, AVX2, and AVX-512BW: it fails on the old
 kernel and passes on the fixed one.
 
+## Symmetric ref/query length bounds guards on the SW wrappers (PR #467)
+
+Every SIMD banded-SW wrapper (`getScores8`/`getScores16`, all widths) copies each
+pair's reference window (`len1`) and query (`len2`) into the SoA lane buffers and
+sizes the per-lane band from those lengths. `SeqPair::len1`/`len2` are signed
+`int32_t`, and the wrappers previously checked only the **upper** bound
+(`len >= MAX_SEQ_LEN8`/`MAX_SEQ_LEN16`), so an out-of-range length that slipped
+through — a **negative** length, or one at or above the packing limit — would index
+the SoA copy/padding buffers out of bounds (negative `k`) or wrap the per-lane
+`uint8_t`/`uint16_t` band quantity. The guards are now symmetric: each wrapper
+rejects both `len1` and `len2` outside `[0, MAX_SEQ_LEN8)` / `[0, MAX_SEQ_LEN16)`
+via `err_fatal` **before any use of those lengths** — the SoA copy and padding
+loops and the per-lane band-size calculation (`qlen[j] = len2 * max`, whose signed
+multiply an unvalidated length could overflow) — and the fatal diagnostic states
+the accepted range rather than only "exceeds".
+
+This is an **invalid-input contract**, not a change to any aligned result: valid
+alignment pairs always carry `0 <= len < MAX_SEQ_LEN`, so the guard is never taken
+on the valid path and the emitted records are **byte-identical by construction** —
+the change only converts previously-undefined behavior on malformed input into a
+deterministic fatal error. Empirically, a record-level comparison of all result
+fields against the pre-change baseline showed zero discordant pairs for the
+extension and mate-rescue kernels on arm64 (Apple Silicon, NEON tier), over
+synthetic pairs at query/reference lengths 100/150/250 (including ambiguous bases)
+at a fixed batch composition; the x86 tiers (SSE4.1, AVX2, AVX-512BW) are built and
+exercised on every CI run. That scopes the measured result to this workload, host,
+and tier — the by-construction invariant above is what extends it to all valid
+inputs.
+
 ---
 
 ## `--meth` SEQ restore clamps unsupported bytes to `N` (PR #463)
@@ -311,6 +340,7 @@ standard fixtures do not exercise the `-` input. The direct-copy forward path (w
 | Vector banded-SW z-drop gate at `-d 0` | [#424](https://github.com/fg-labs/bwa-mem3/pull/424) | — | fork-only (z-drop-disabled only; default `-d 100` byte-identical) |
 | 16-bit banded-SW per-lane band clamp (wide arithmetic) | [#423](https://github.com/fg-labs/bwa-mem3/pull/423) | — | fork-only (non-default scoring only; default path unchanged — see the correctness note above) |
 | `--meth` SEQ restore clamps unsupported bytes to `N` | [#463](https://github.com/fg-labs/bwa-mem3/pull/463) | — | fork-only (`--meth` only; changes a `-` byte to `N` on the `nst_nt4_table` lookup paths only — the direct-copy forward path, all other bytes, and the default path are unchanged) |
+| Symmetric ref/query length bounds guards on the SW wrappers | [#467](https://github.com/fg-labs/bwa-mem3/pull/467) | — | fork-only (invalid-input contract; valid-input records byte-identical by construction — see the PR #467 correctness note above for the measured scope) |
 | kseq2bseq1 zero-initialization | [#22](https://github.com/fg-labs/bwa-mem3/pull/22) | — | fork-only |
 | Proper-pair flag from emitted alignment | [#17](https://github.com/fg-labs/bwa-mem3/pull/17) | — | fork-only, **opt-in** (`--proper-pair-from-emitted`; default matches both upstreams, [#362](https://github.com/fg-labs/bwa-mem3/issues/362)) |
 
