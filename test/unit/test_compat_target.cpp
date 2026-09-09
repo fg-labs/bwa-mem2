@@ -37,6 +37,9 @@ TEST_CASE("compat target `off` is bwa-mem3's native output") {
     // #310: `off` keeps bwa-mem2's all-chains-dropped behavior, because the
     // default path is the drop-in and must not move an alignment.
     CHECK(t->chain_flt_resurrect_empty == 1);
+    // #469: `off` reports the correct sentinel-row coordinate; only the
+    // bwa-mem2 target keeps bwa-mem2's dropped walk offset.
+    CHECK(t->sa_sentinel_drop_offset == 0);
     // `off` pins the one canonical default. It used to be NULL, meaning "each
     // path keeps whatever it emits" -- which was a different string on the SAM
     // text and BAM paths until #288 unified them.
@@ -63,6 +66,7 @@ TEST_CASE("compat target `bwa-mem2` matches bwa-mem2 v2.2.1") {
     CHECK(t->emit_hn == 0);
     // #310: bwa-mem2 resurrects the rejected slot-0 chain; that IS the target.
     CHECK(t->chain_flt_resurrect_empty == 1);
+    CHECK(t->sa_sentinel_drop_offset == 1);   // #469: bwa-mem2 drops the walk offset
 }
 
 TEST_CASE("compat target `bwa-mem` matches bwa 0.7.19") {
@@ -90,6 +94,7 @@ TEST_CASE("compat target `bwa-mem` matches bwa 0.7.19") {
     // #310: THE field that is not output shaping. bwa returns 0 survivors and
     // leaves the read unmapped; modelling that is the whole point of the row.
     CHECK(t->chain_flt_resurrect_empty == 0);
+    CHECK(t->sa_sentinel_drop_offset == 0);   // #469: bwa's bwt_sa keeps it
 }
 
 TEST_CASE("bwa and bwa-mem2 rows differ exactly where the upstreams do") {
@@ -105,6 +110,10 @@ TEST_CASE("bwa and bwa-mem2 rows differ exactly where the upstreams do") {
     // ...plus the one alignment-affecting divergence (#310), which is NOT a
     // fork-point artifact: bwa-mem2 introduced it, and bwa never had it.
     CHECK(mem->chain_flt_resurrect_empty != mem2->chain_flt_resurrect_empty);
+    // ...and the second one (#469): bwa-mem2's suffix-array lookup drops the
+    // LF walk offset at the sentinel row; bwa's bwt_sa never did.
+    CHECK(mem2->sa_sentinel_drop_offset == 1);
+    CHECK(mem->sa_sentinel_drop_offset == 0);
 }
 
 TEST_CASE("compat target lookup: aliases, unknown names, NULL") {

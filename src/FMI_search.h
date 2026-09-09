@@ -311,6 +311,11 @@ class FMI_search: public indexEle
                    int32_t readlength,
                    int nthreads,
                    SmemSortScratch &scratch);
+    // Uncompressed SA accessors -- index sa_ms_byte/sa_ls_word by raw BWT row, so
+    // they read out of bounds against the SA_COMPRESSION-sized arrays. Fenced to
+    // match their definitions in FMI_search.cpp; the compressed equivalents below
+    // are the shipped paths. Every in-tree caller is likewise `#if !SA_COMPRESSION`.
+#if !SA_COMPRESSION
     int64_t get_sa_entry(int64_t pos);
     void get_sa_entries(int64_t *posArray,
                         int64_t *coordArray,
@@ -321,6 +326,7 @@ class FMI_search: public indexEle
                         int32_t *coordCountArray,
                         uint32_t count,
                         int32_t max_occ);
+#endif // !SA_COMPRESSION
     int64_t get_sa_entry_compressed(int64_t pos, int tid=0);
     void get_sa_entries(SMEM *smemArray,
                         int64_t *coordArray,
@@ -328,10 +334,16 @@ class FMI_search: public indexEle
                         uint32_t count,
                         int32_t max_occ,
                         int tid);
-    int64_t call_one_step(int64_t pos, int64_t &sa_entry, int64_t &offset);
+    /* drop_sentinel_offset selects the coordinate reported when the LF walk
+     * reaches the sentinel row: 0 = the accumulated walk offset (correct, bwa's
+     * behaviour), 1 = 0 (bwa-mem2 v2.2.1's behaviour, selected by
+     * --compat=bwa-mem2; see compat_target_t::sa_sentinel_drop_offset). */
+    int64_t call_one_step(int64_t pos, int64_t &sa_entry, int64_t &offset,
+                          int drop_sentinel_offset = 0);
     void get_sa_entries_prefetch(SMEM *smemArray, int64_t *coordArray,
                                  int64_t *coordCountArray, int64_t count,
-                                 const int32_t max_occ, int tid, int64_t &id_);
+                                 const int32_t max_occ, int tid, int64_t &id_,
+                                 int drop_sentinel_offset = 0);
     
     int64_t reference_seq_len;
     int64_t sentinel_index;

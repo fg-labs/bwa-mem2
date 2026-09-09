@@ -1027,6 +1027,14 @@ jobs:
           CHAIN_FLT_WORK_DIR=/tmp/chain-flt-empty \
           bash test/regression/chain_flt_empty_compat.sh
 
+      - name: SA sentinel-offset compat regression (#469)
+        if: matrix.canonical == true
+        run: |
+          BWA_MEM3="$GITHUB_WORKSPACE/bwa-mem3" \
+          SA_SENTINEL_PHIX_FA="$GITHUB_WORKSPACE/test/fixtures/phix.fa" \
+          SA_SENTINEL_WORK_DIR=/tmp/sa-sentinel-compat \
+          bash test/regression/compat_sa_sentinel.sh
+
       - name: header parity regression (AH:*, --compat @HD/@SQ)
         if: matrix.canonical == true
         run: |

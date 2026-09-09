@@ -114,7 +114,14 @@ int main(int argc, char **argv) {
             fprintf(stderr, "refCoordArray capacity exceeded before processing all SMEMs\n");
             break;
         }
-        fmiSearch->get_sa_entries(smemArray + i, refCoordArray + numOffs, &count, 1, max_occ);
+        // Use the SA_COMPRESSION-aware accessor (the tid overload, backed by
+        // get_sa_entry_compressed). The raw get_sa_entries(SMEM*,...,max_occ)
+        // overload is fenced under `#if !SA_COMPRESSION`: it indexes the SA arrays
+        // by raw BWT row and reads out of bounds against the compressed layout the
+        // shipped index actually uses. `count` is reset to 0 above and the tid
+        // overload accumulates into it (*coordCountArray += c), so a single-SMEM
+        // call still yields count == c, matching the old overload's coordCount[0].
+        fmiSearch->get_sa_entries(smemArray + i, refCoordArray + numOffs, &count, 1, max_occ, 0);
         if (count < 0 || numOffs + count > MAX_NUM_OFFSET) {
             fprintf(stderr, "refCoordArray capacity exceeded while collecting SA entries\n");
             break;
