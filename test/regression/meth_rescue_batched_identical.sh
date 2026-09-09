@@ -23,9 +23,9 @@
 # kswv score is re-derived downstream (mem_sort_dedup_patch + the asymmetric
 # mem_reg2aln re-scoring), so the SIMD vs scalar score difference does not surface
 # in the final BAM. The authoritative byte-identity gate for the mat-aware
-# OT/OB rescue kernel is the standalone sw-kernel-bench METH SELF-CHECK
-# (`sw_bench --mode rescue --meth ot|ob`), which compares the batched kswv kernel
-# against scalar ksw_align2 with the same asymmetric matrix, field-by-field.
+# OT/OB rescue kernel is a separate, standalone SW-kernel byte-identity check
+# that compares the batched kswv kernel against scalar ksw_align2 with the same
+# asymmetric matrix, field-by-field.
 #
 # Inputs:
 #   BWA_MEM3 — path to the bwa-mem3 binary under test

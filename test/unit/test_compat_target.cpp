@@ -120,7 +120,7 @@ TEST_CASE("compat target lookup: aliases, unknown names, NULL") {
     // `mem2` is the documented short spelling and must resolve to the same row.
     CHECK(compat_target_from_name("mem2") == compat_target_from_name("bwa-mem2"));
     // Unknown names are NULL so the caller can say "unknown target"...
-    CHECK(compat_target_from_name("bwa-mem4") == nullptr);
+    CHECK(compat_target_from_name("unknown-aligner") == nullptr);
     CHECK(compat_target_from_name("") == nullptr);
     CHECK(compat_target_from_name(nullptr) == nullptr);
     // Lookup is exact: no prefix or case folding.

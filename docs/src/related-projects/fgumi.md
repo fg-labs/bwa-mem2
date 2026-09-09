@@ -31,8 +31,8 @@ fgumi and bwa-mem3 are sibling projects maintained by Fulcrum Genomics and are d
 to work together in the same alignment-and-consensus pipeline. bwa-mem3 provides the
 aligned BAM that fgumi takes as input for grouping and consensus calling. The two projects
 share build and documentation conventions (mdbook on Read the Docs, Fulcrum theme,
-conventional commits) and are benchmarked together in the fgumi-benchmarks internal
-dataset suite. The intended integration path for in-process alignment within fgumi is
+conventional commits) and are benchmarked together on a shared internal dataset
+suite. The intended integration path for in-process alignment within fgumi is
 [bwa-mem3-rs](bwa-mem3-rs.md), the Rust bindings for bwa-mem3.
 
 ## Links
