@@ -1771,6 +1771,25 @@ static void meth_orig_ref_free_handles(ktp_aux_t *aux)
     }
 }
 
+/* Close the SE (and, if opened, PE) input readers that main_mem set up, so an
+ * early error return taken *after* the readers are open does not leak them.
+ * Mirrors the normal end-of-function teardown exactly; safe with the
+ * zero-initialized handles (ko/ko2/fp/fp2 = 0, aux memset to 0), and the PE
+ * branch is guarded on the PE reader actually existing. This runs on the
+ * main thread during setup, before any worker threads spawn. */
+static void mem_close_input_readers(ktp_aux_t &aux, gzFile fp, gzFile fp2,
+                                    void *ko, void *ko2)
+{
+    if (aux.legacy_reader) { kseq_destroy(aux.ks); err_gzclose(fp); }
+    else { fast_kseq_destroy(aux.frks); fast_reader_close(aux.fr1); }
+    kclose(ko);
+    if (aux.ks2 || aux.fr2) {
+        if (aux.legacy_reader) { kseq_destroy(aux.ks2); err_gzclose(fp2); }
+        else { fast_kseq_destroy(aux.frks2); fast_reader_close(aux.fr2); }
+        kclose(ko2);
+    }
+}
+
 int main_mem(int argc, char *argv[])
 {
     int          i, c, ignore_alt = 0, no_mt_io = 0;
@@ -3456,6 +3475,7 @@ int main_mem(int argc, char *argv[])
             fprintf(stderr, "ERROR: meth: original reference (bns/pac) not loaded\n");
             free(opt);
             delete aux.fmi;
+            mem_close_input_readers(aux, fp, fp2, ko, ko2);
             return 1;
         }
         g_meth_orig_pac = aux.meth_orig_pac;
@@ -3477,6 +3497,7 @@ int main_mem(int argc, char *argv[])
             fprintf(stderr, "ERROR: meth: original reference (bns/pac) not loaded\n");
             free(opt);
             delete aux.fmi;
+            mem_close_input_readers(aux, fp, fp2, ko, ko2);
             return 1;
         }
         g_meth_orig_pac = aux.meth_orig_pac;
@@ -3495,6 +3516,7 @@ int main_mem(int argc, char *argv[])
             g_meth_orig_pac = NULL;
             free(opt);
             delete aux.fmi;
+            mem_close_input_readers(aux, fp, fp2, ko, ko2);
             return 1;
         }
     } else if (opt->bam_mode) {
@@ -3511,6 +3533,7 @@ int main_mem(int argc, char *argv[])
             fprintf(stderr, "ERROR: failed to open BAM writer at '%s'\n", bam_path);
             free(opt);
             delete aux.fmi;
+            mem_close_input_readers(aux, fp, fp2, ko, ko2);
             return 1;
         }
         aux.bam_writer = bam_writer;
@@ -3522,6 +3545,7 @@ int main_mem(int argc, char *argv[])
                 fprintf(stderr, "Error: can't open %s output file\n", out_path);
                 free(opt);
                 delete aux.fmi;
+                mem_close_input_readers(aux, fp, fp2, ko, ko2);
                 return 1;
             }
             out_opened = true;
@@ -3827,6 +3851,11 @@ int main_mem(int argc, char *argv[])
      * NULL-safe. Now reached on every run since the seeding checkpoint is gone. */
     meth_orig_ref_free_handles(&aux);
     delete(aux.fmi);
+
+    /* Release the read-memo module scratch (role[]/rep_pair[]/chain buffers).
+     * Reached only after the worker pipeline has joined, so no live thread can
+     * touch it; without this the one-shot buffers stay reachable-but-unfreed. */
+    mem_readmemo_teardown();
 
     /* Display runtime profiling stats */
     tprof[MEM][0] = __rdtsc() - tprof[MEM][0];

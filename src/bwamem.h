@@ -836,6 +836,10 @@ void mem_process_seqs(mem_opt_t *opt, int64_t n_processed,
                       int n, bseq1_t *seqs, const mem_pestat_t *pes0,
                       worker_t &w);
 
+/* Release the read-memo module scratch at shutdown (after the worker pipeline
+ * finishes). Idempotent. */
+void mem_readmemo_teardown(void);
+
 /**
  * Align one slice of a pestat cohort: seeding + banded SW only, no pairing.
  *

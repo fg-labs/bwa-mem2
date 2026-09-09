@@ -171,6 +171,29 @@ static void readmemo_state_grow(read_memo_state *st, int npairs)
     }
 }
 
+/* Release a read_memo_state's grown-in-place buffers. Call at shutdown, after
+ * all worker threads have joined, so these one-shot allocations are not left
+ * still-reachable at process exit. Safe on a zeroed/partial state and idempotent. */
+void read_memo_state_free(read_memo_state *st)
+{
+    if (st == NULL) return;
+    free(st->role);
+    free(st->rep_pair);
+    st->role     = NULL;
+    st->rep_pair = NULL;
+    st->npairs   = 0;
+    st->cap      = 0;
+}
+
+/* Release the module-scope chain scratch (g_chain_next). Pairs with
+ * read_memo_state_free; same shutdown-only, idempotent contract. */
+void read_memo_teardown(void)
+{
+    free(g_chain_next);
+    g_chain_next = NULL;
+    g_chain_cap  = 0;
+}
+
 read_memo_result read_memo_prepass(const mem_opt_t * /*opt*/, const bseq1_t *seqs,
                                    int n, read_memo_state *st)
 {
