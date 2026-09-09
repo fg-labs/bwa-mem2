@@ -657,6 +657,41 @@ private:
     int8_t w_open;
     int8_t w_extend;
     int8_t w_ambig;
+
+    // Scoring-matrix-derived state. bsw_generic_matrix / bsw_freed_cell /
+    // build_pmat16 / build_amat16 are pure functions of mat / w_match /
+    // w_mismatch / w_ambig -- all set once in the constructor and never mutated
+    // -- yet each vector kernel rebuilt them from scratch on every SIMD-batch
+    // call. Compute them once at construction (bsw_build_mat_cache) and have the
+    // kernels read these members; the per-call result is bit-identical since the
+    // inputs are call-invariant. Filled in the ctor (before any kernel runs), so
+    // safe against the concurrent kernels that share one instance by tid.
+    //
+    // Invariant (structural, not defensively guarded): every constructor must
+    // call bsw_build_mat_cache() before the instance is used. Holds because this
+    // class is `final` with a single constructor and deleted copy/move, so no
+    // instance can reach a kernel with the cache unfilled. A future second ctor
+    // MUST call bsw_build_mat_cache() too -- default member initializers are
+    // deliberately omitted (a zeroed cache would not be a safe fallback: the
+    // kernels would read all-zero pmat/amat LUT bytes and mis-score, not degrade
+    // to the symmetric fast path).
+    //
+    // Alignment: bsw_pmat_bytes_ / bsw_amat_bytes_ are read with the *aligned*
+    // _mm_load_si128 at every kernel site. The aligned(16) attribute makes each a
+    // 16-aligned member and forces alignof(BandedPairWiseSW) >= 16, so the bytes
+    // are 16-aligned for *any* allocation of the object (heap, stack, or embedded)
+    // -- the aligned load is always valid, not merely for the current new-only
+    // instantiation. bsw_pmat16_lut_ is a 64-byte value but is intentionally kept
+    // aligned(16) and read with the *unaligned* _mm512_loadu_si512: aligning it to
+    // 64 would force alignof(class)==64 (an over-aligned-new dependency) for a LUT
+    // load that runs once per SIMD batch, not in the DP inner loop -- not worth it.
+    bool         bsw_gen_mat_;              // bsw_generic_matrix(...) || bsw_force_generic_matrix()
+    BswFreedCell bsw_fc_;
+    int8_t       bsw_pmat_bytes_[16]  __attribute__((aligned(16)));  // build_pmat16 (aligned _mm_load_si128)
+    int8_t       bsw_amat_bytes_[16]  __attribute__((aligned(16)));  // build_amat16 (aligned _mm_load_si128)
+    int16_t      bsw_pmat16_lut_[32]  __attribute__((aligned(16)));  // build_pmat16_lut (AVX-512 16b, loadu)
+    void         bsw_build_mat_cache();
+
     int8_t *F8_;
     int8_t *H8_, *H8__;
 

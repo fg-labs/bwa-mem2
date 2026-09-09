@@ -192,6 +192,10 @@ BandedPairWiseSW::BandedPairWiseSW(const int o_del, const int e_del, const int o
     this->w_open     = o_del;  // redundant, used in vector code.
     this->w_extend   = e_del;  // redundant, used in vector code.
     this->w_ambig    = DEFAULT_AMBIG;
+    // Precompute the scoring-matrix-derived state once, now that mat/w_match/
+    // w_mismatch/w_ambig are final; the kernels read it instead of rebuilding
+    // it per SIMD-batch. See bsw_build_mat_cache().
+    bsw_build_mat_cache();
     this->swTicks = 0;
     this->SW_cells = 0;
     setupTicks = 0;
@@ -238,6 +242,26 @@ BandedPairWiseSW::BandedPairWiseSW(const int o_del, const int e_del, const int o
     H16_  = (int16_t *)(base + 4 * sz8 + sz16);
     H16__ = (int16_t *)(base + 4 * sz8 + 2 * sz16);
     sbt16_ = (int16_t *)(base + 4 * sz8 + 3 * sz16);
+}
+
+// Compute the scoring-matrix-derived state once. Pure functions of the
+// constructor-fixed this->mat / w_match / w_mismatch / w_ambig, so the result is
+// identical to what every kernel recomputed per SIMD-batch -- this just hoists
+// it off the hot path. Uses the same this-> values (negated w_mismatch,
+// DEFAULT_AMBIG) the kernels pass, so the cached bytes/predicates are bit-exact.
+// Invariant: this caches the *contents* of the pointed-to matrix (*mat, 25
+// bytes), not just the mat pointer -- valid because the scoring matrix is
+// run-constant for the instance's lifetime and nothing mutates *mat after
+// construction (the pre-hoist kernels re-read it every call). If a future path
+// mutates a scoring matrix in place between batches, this cache must be rebuilt.
+void BandedPairWiseSW::bsw_build_mat_cache() {
+    const bool forced = bsw_force_generic_matrix();  // ctor-local; not a member (no kernel reads it)
+    bsw_gen_mat_ = bsw_generic_matrix(this->mat, this->w_match, this->w_mismatch)
+                   || forced;
+    bsw_fc_      = bsw_freed_cell(this->mat, this->w_match, this->w_mismatch, forced);
+    build_pmat16(bsw_pmat_bytes_, this->w_match, this->w_mismatch, this->w_ambig);
+    build_amat16(bsw_amat_bytes_, this->mat);
+    build_pmat16_lut(bsw_pmat16_lut_, this->w_match, this->w_mismatch, this->w_ambig);
 }
 
 // destructor
@@ -928,21 +952,18 @@ void BandedPairWiseSW::smithWaterman256_8(uint8_t seq1SoA[],
 
     // PR 16: pmat LUT, broadcast into both 128-bit halves (shuffle_epi8 is
     // lane-wise on AVX2 — each half shuffles against its own half of pmat256).
-    int8_t pmat_bytes[16] __attribute__((aligned(16)));
-    build_pmat16(pmat_bytes, this->w_match, this->w_mismatch, this->w_ambig);
-    __m128i pmat128 = _mm_load_si128((__m128i *)pmat_bytes);
-    __m256i pmat256 = _mm256_broadcastsi128_si256(pmat128);
     // D3 generic-matrix seam: symmetric default uses the XOR pmat (fast); an
     // asymmetric matrix (bisulfite OT/OB) uses the target-major amat LUT.
-    const bool forced  = bsw_force_generic_matrix();
-    const bool gen_mat = bsw_generic_matrix(this->mat, this->w_match, this->w_mismatch)
-                         || forced;
-    const BswFreedCell fc = bsw_freed_cell(this->mat, this->w_match, this->w_mismatch, forced);
+    // gen_mat / fc / the pmat & amat LUTs are cached in the constructor
+    // (bsw_build_mat_cache): pure functions of the construction-fixed matrix, so
+    // reading the cache is bit-identical to the former per-batch recompute.
+    __m128i pmat128 = _mm_load_si128((__m128i *)bsw_pmat_bytes_);
+    __m256i pmat256 = _mm256_broadcastsi128_si256(pmat128);
+    const bool gen_mat = bsw_gen_mat_;
+    const BswFreedCell fc = bsw_fc_;
     __m256i frref256  = _mm256_set1_epi8(fc.ref);
     __m256i frread256 = _mm256_set1_epi8(fc.read);
-    int8_t amat_bytes[16] __attribute__((aligned(16)));
-    build_amat16(amat_bytes, this->mat);
-    __m256i amat256 = _mm256_broadcastsi128_si256(_mm_load_si128((__m128i *)amat_bytes));
+    __m256i amat256 = _mm256_broadcastsi128_si256(_mm_load_si128((__m128i *)bsw_amat_bytes_));
     __m256i three256_8 = _mm256_set1_epi8(3);
 
     __m256i e_del256    = _mm256_set1_epi8(this->e_del);
@@ -1905,15 +1926,13 @@ void BandedPairWiseSW::smithWaterman256_16(uint16_t seq1SoA[],
     // D3 generic-matrix seam: symmetric default uses SBT_PREPASS16_SYM; a single
     // freed-to-match cell (bisulfite) uses the rank-1 path; any other asymmetric
     // matrix uses the amat LUT. gen_mat is false on the hot path.
-    const bool forced  = bsw_force_generic_matrix();
-    const bool gen_mat = bsw_generic_matrix(this->mat, this->w_match, this->w_mismatch)
-                         || forced;
-    const BswFreedCell fc = bsw_freed_cell(this->mat, this->w_match, this->w_mismatch, forced);
+    // gen_mat / fc / amat LUT cached in the constructor (bsw_build_mat_cache);
+    // reading the cache is bit-identical to the former per-batch recompute.
+    const bool gen_mat = bsw_gen_mat_;
+    const BswFreedCell fc = bsw_fc_;
     __m256i frref256  = _mm256_set1_epi16(fc.ref);
     __m256i frread256 = _mm256_set1_epi16(fc.read);
-    int8_t amat_bytes[16] __attribute__((aligned(16)));
-    build_amat16(amat_bytes, this->mat);
-    __m256i amat256   = _mm256_broadcastsi128_si256(_mm_load_si128((__m128i *)amat_bytes));
+    __m256i amat256   = _mm256_broadcastsi128_si256(_mm_load_si128((__m128i *)bsw_amat_bytes_));
     __m256i three256  = _mm256_set1_epi16(3);
 
     __m256i e_del256    = _mm256_set1_epi16(this->e_del);
@@ -2841,21 +2860,17 @@ void BandedPairWiseSW::smithWaterman512_8(uint8_t seq1SoA[],
     __m512i five512      = _mm512_set1_epi8(5);
 
     // PR 16: pmat LUT broadcast into all 4 128-bit lanes of 512-bit register.
-    int8_t pmat_bytes[16] __attribute__((aligned(16)));
-    build_pmat16(pmat_bytes, this->w_match, this->w_mismatch, this->w_ambig);
-    __m128i pmat128 = _mm_load_si128((__m128i *)pmat_bytes);
-    __m512i pmat512 = _mm512_broadcast_i32x4(pmat128);
     // D3 generic-matrix seam: symmetric default uses the XOR pmat; an asymmetric
-    // matrix (bisulfite OT/OB) uses the target-major amat LUT.
-    const bool forced  = bsw_force_generic_matrix();
-    const bool gen_mat = bsw_generic_matrix(this->mat, this->w_match, this->w_mismatch)
-                         || forced;
-    const BswFreedCell fc = bsw_freed_cell(this->mat, this->w_match, this->w_mismatch, forced);
+    // matrix (bisulfite OT/OB) uses the target-major amat LUT. gen_mat / fc / the
+    // pmat & amat LUTs are cached in the constructor (bsw_build_mat_cache) --
+    // reading the cache is bit-identical to the former per-batch recompute.
+    __m128i pmat128 = _mm_load_si128((__m128i *)bsw_pmat_bytes_);
+    __m512i pmat512 = _mm512_broadcast_i32x4(pmat128);
+    const bool gen_mat = bsw_gen_mat_;
+    const BswFreedCell fc = bsw_fc_;
     __m512i frref512  = _mm512_set1_epi8(fc.ref);
     __m512i frread512 = _mm512_set1_epi8(fc.read);
-    int8_t amat_bytes[16] __attribute__((aligned(16)));
-    build_amat16(amat_bytes, this->mat);
-    __m512i amat512 = _mm512_broadcast_i32x4(_mm_load_si128((__m128i *)amat_bytes));
+    __m512i amat512 = _mm512_broadcast_i32x4(_mm_load_si128((__m128i *)bsw_amat_bytes_));
     __m512i three512_8 = _mm512_set1_epi8(3);
 
     __m512i e_del512    = _mm512_set1_epi8(this->e_del);
@@ -3605,8 +3620,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
         // (!gen_mat) hot path the LUT prepass requires the asymmetric AMBR16/
         // AMBQ16 codes; the generic-matrix (RANK1/AMAT bisulfite) paths keep the
         // legacy symmetric N=0xFFFF. gen_mat here MUST match smithWaterman512_16.
-        const bool gen_mat16 = bsw_generic_matrix(this->mat, this->w_match, this->w_mismatch)
-                               || bsw_force_generic_matrix();
+        const bool gen_mat16 = bsw_gen_mat_;   // cached in ctor (== per-call value)
         const uint16_t ambRef = gen_mat16 ? (uint16_t)0xFFFF : (uint16_t)AMBR16;
         const uint16_t ambQer = gen_mat16 ? (uint16_t)0xFFFF : (uint16_t)AMBQ16;
 
@@ -3811,24 +3825,23 @@ void BandedPairWiseSW::smithWaterman512_16(uint16_t seq1SoA[],
 
     // D3 generic-matrix seam: symmetric default uses SYM; a single freed-to-match
     // cell (bisulfite) uses rank-1; any other asymmetric matrix uses the amat LUT.
-    const bool forced  = bsw_force_generic_matrix();
-    const bool gen_mat = bsw_generic_matrix(this->mat, this->w_match, this->w_mismatch)
-                         || forced;
-    const BswFreedCell fc = bsw_freed_cell(this->mat, this->w_match, this->w_mismatch, forced);
+    // gen_mat / fc / amat & pmat16 LUTs cached in the constructor
+    // (bsw_build_mat_cache); reading the cache is bit-identical to the former
+    // per-batch recompute.
+    const bool gen_mat = bsw_gen_mat_;
+    const BswFreedCell fc = bsw_fc_;
     __m512i frref512  = _mm512_set1_epi16(fc.ref);
     __m512i frread512 = _mm512_set1_epi16(fc.read);
-    int8_t amat_bytes[16] __attribute__((aligned(16)));
-    build_amat16(amat_bytes, this->mat);
-    __m512i amat512   = _mm512_broadcast_i32x4(_mm_load_si128((__m128i *)amat_bytes));
+    __m512i amat512   = _mm512_broadcast_i32x4(_mm_load_si128((__m128i *)bsw_amat_bytes_));
     __m512i three512  = _mm512_set1_epi16(3);
 
     // PR: 32-entry int16 LUT for the symmetric-path permutexvar prepass
     // (SBT_PREPASS16_LUT). Built once per invocation; consumed only when
     // !gen_mat. Requires the asymmetric AMBR16/AMBQ16 SoA encoding from
     // getScores16 (gen_mat there matches gen_mat here).
-    int16_t pmat16_lut[32] __attribute__((aligned(64)));
-    build_pmat16_lut(pmat16_lut, this->w_match, this->w_mismatch, this->w_ambig);
-    __m512i pmat16_512 = _mm512_load_si512((__m512i *) pmat16_lut);
+    // Cached in the constructor (bsw_pmat16_lut_); loadu tolerates the member's
+    // natural alignment, and the loaded value is identical to the aligned load.
+    __m512i pmat16_512 = _mm512_loadu_si512((__m512i *) bsw_pmat16_lut_);
 
     __m512i e_del512    = _mm512_set1_epi16(this->e_del);
     __m512i oe_del512   = _mm512_set1_epi16(this->o_del + this->e_del);
@@ -4589,8 +4602,7 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
         const uint16_t ambRef = (uint16_t)0xFFFF;
         const uint16_t ambQer = (uint16_t)0xFFFF;
 #else
-        const bool gen_mat16 = bsw_generic_matrix(this->mat, this->w_match, this->w_mismatch)
-                               || bsw_force_generic_matrix();
+        const bool gen_mat16 = bsw_gen_mat_;   // cached in ctor (== per-call value)
         const uint16_t ambRef = gen_mat16 ? (uint16_t)0xFFFF : (uint16_t)AMBIG;
         const uint16_t ambQer = gen_mat16 ? (uint16_t)0xFFFF : (uint16_t)8;
 #endif
@@ -4796,15 +4808,15 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
     // overlaid on the symmetric base (SBT_PREPASS16_AMAT). The default aligner
     // matrix is symmetric, so gen_mat is false on the hot path and the kernel
     // uses the original cheap SBT_PREPASS16_SYM — no perf cost when not needed.
-    const bool forced  = bsw_force_generic_matrix();
-    const bool gen_mat = bsw_generic_matrix(this->mat, this->w_match, this->w_mismatch)
-                         || forced;
-    const BswFreedCell fc = bsw_freed_cell(this->mat, this->w_match, this->w_mismatch, forced);
+    // Matrix-derived state (gen_mat / fc / the amat LUT) is cached once in the
+    // constructor (bsw_build_mat_cache): pure functions of the construction-fixed
+    // matrix, so reading the cache is bit-identical to the former per-SIMD-batch
+    // recompute, off the hot path.
+    const bool gen_mat = bsw_gen_mat_;
+    const BswFreedCell fc = bsw_fc_;
     __m128i frref128  = _mm_set1_epi16(fc.ref);
     __m128i frread128 = _mm_set1_epi16(fc.read);
-    int8_t amat_bytes[16] __attribute__((aligned(16)));
-    build_amat16(amat_bytes, this->mat);
-    __m128i amat128 = _mm_load_si128((__m128i *)amat_bytes);
+    __m128i amat128 = _mm_load_si128((__m128i *)bsw_amat_bytes_);
     __m128i three128 = _mm_set1_epi16(3);                    // ACGT mask (base <= 3)
 
     // 16-byte int8 LUT for the x86 symmetric-path byte-LUT prepass
@@ -4813,9 +4825,9 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
     // NEON keeps the SYM prepass (the LUT form regresses there), so this LUT is
     // built only for the x86 tiers that use it.
 #if !(defined(__ARM_NEON) || defined(__aarch64__))
-    int8_t pmat16_bytes[16] __attribute__((aligned(16)));
-    build_pmat16(pmat16_bytes, (int8_t)this->w_match, (int8_t)this->w_mismatch, (int8_t)this->w_ambig);
-    __m128i pmat16_128 = _mm_load_si128((__m128i *)pmat16_bytes);
+    // Same bytes as the ctor-cached bsw_pmat_bytes_ (build_pmat16 over the int8
+    // fields; the casts here were no-ops). Read the cache.
+    __m128i pmat16_128 = _mm_load_si128((__m128i *)bsw_pmat_bytes_);
 #endif
 
     __m128i e_del128    = _mm_set1_epi16(this->e_del);
@@ -5848,15 +5860,15 @@ void BandedPairWiseSW::smithWaterman128_8(uint8_t seq1SoA[],
     // LUT (SBT_PREPASS8_XOR, pmat128); an asymmetric matrix (bisulfite OT/OB)
     // uses the target-major LUT amat[(ref<<2)|read] (SBT_PREPASS8_AMAT). gen_mat
     // is false on the hot path, so symmetric scoring keeps its original speed.
-    const bool forced  = bsw_force_generic_matrix();
-    const bool gen_mat = bsw_generic_matrix(this->mat, this->w_match, this->w_mismatch)
-                         || forced;
-    const BswFreedCell fc = bsw_freed_cell(this->mat, this->w_match, this->w_mismatch, forced);
+    // Matrix-derived state (gen_mat / fc / the pmat & amat LUTs) is cached once
+    // in the constructor (bsw_build_mat_cache): all pure functions of the
+    // construction-fixed matrix, so reading the cache here is bit-identical to
+    // the former per-SIMD-batch recompute, off the hot path.
+    const bool gen_mat = bsw_gen_mat_;
+    const BswFreedCell fc = bsw_fc_;
     __m128i frref128  = _mm_set1_epi8(fc.ref);
     __m128i frread128 = _mm_set1_epi8(fc.read);
-    int8_t pmat_bytes[16] __attribute__((aligned(16)));
-    build_pmat16(pmat_bytes, this->w_match, this->w_mismatch, this->w_ambig);
-    __m128i pmat128 = _mm_load_si128((__m128i *)pmat_bytes);
+    __m128i pmat128 = _mm_load_si128((__m128i *)bsw_pmat_bytes_);
     // EXT-11: two per-band split LUTs for the symmetric XOR fast path.
     // sbt_pos = max(sbt,0) and sbt_neg = max(-sbt,0) are an ELEMENTWISE transform
     // of the pmat entries, so transforming the whole 16-byte LUT once per pair and
@@ -5866,9 +5878,7 @@ void BandedPairWiseSW::smithWaterman128_8(uint8_t seq1SoA[],
     // MAIN_CODE8_CORE split bit-for-bit.
     __m128i pmat_pos128, pmat_neg128;
     SBT_SPLIT8(pmat128, pmat_pos128, pmat_neg128, _mm_setzero_si128());
-    int8_t amat_bytes[16] __attribute__((aligned(16)));
-    build_amat16(amat_bytes, this->mat);
-    __m128i amat128 = _mm_load_si128((__m128i *)amat_bytes);
+    __m128i amat128 = _mm_load_si128((__m128i *)bsw_amat_bytes_);
     __m128i three128 = _mm_set1_epi8(3);                     // N threshold (base > 3)
 
     __m128i e_del128    = _mm_set1_epi8(this->e_del);
