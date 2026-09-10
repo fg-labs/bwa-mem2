@@ -64,7 +64,8 @@ meth_bam_writer_t *meth_bam_writer_open(const char *path_or_dash,
                                         const char *hdr_line,
                                         const char *orig_idx_hdr_lines,
                                         int bam,
-                                        int compression_level);
+                                        int compression_level,
+                                        int n_bgzf_threads);
 
 /* Write one bam1_t. Returns 0 on success, -1 on error. */
 int meth_bam_writer_write(meth_bam_writer_t *w, struct bam1_t *b);

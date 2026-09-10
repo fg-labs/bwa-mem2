@@ -11,6 +11,16 @@ for a specific compression level) to write BAM. Level 0 (uncompressed) is the
 default when `--bam` is given without an argument, which is optimal when piping
 to a downstream `samtools sort`.
 
+For compressed BAM (`--bam=1..9`), the BGZF deflate is parallelized and
+auto-scaled from `-t` (`--bam-threads`, default integer `-t/8`), so compression is
+not a throughput bottleneck out of the box at `-t >= 8`. Below `-t 8` the integer
+`-t/8` is 0, so the pool is empty and compression stays serial. The compressed record stream is
+byte-identical to serial: records decode identically and the compressed record
+bytes match, after excluding the `@PG CL:` line (it records the `--bam-threads`
+value, so it differs between a serial and an explicit-thread invocation). Override
+with `--bam-threads N` (and `--bam-threads 0` to force the old single-threaded
+deflate).
+
 ```bash
 # SAM (default)
 bwa-mem3 mem -t 16 ref.fa R1.fq.gz R2.fq.gz > out.sam

@@ -217,6 +217,33 @@ occurs when the output is piped to `samtools view -bS`.
 - `--bam=1..9`: BGZF deflate at the specified level.
 - No flag: SAM text on stdout (default, unchanged).
 
+### `--bam-threads INT` — parallel BGZF compression
+
+*Introduced in [PR #474](https://github.com/fg-labs/bwa-mem3/pull/474).*
+
+For compressed output (`--bam=1..9`) the per-block BGZF deflate is parallelized
+across a thread pool (htslib `hts_set_threads`). `--bam-threads` controls the
+pool size and **defaults to the integer `-t/8`** when compressing (0 threads when
+uncompressed, and 0 below `-t 8`, so compression stays serial there): the deflate
+work is fixed per output but alignment gets faster with more threads, so the pool
+scales with `-t` to keep compression hidden behind alignment. This is a deliberate
+default change — compressed `--bam=N` is auto-parallelized (parallel only at
+`-t >= 8`) rather than serial — the automatic default is bounded to ~12.5% of the
+thread budget and measured to remove the write-side bottleneck: **2.29×** (`--bam=6
+-t64 --bam-threads=8` vs the serial deflate baseline; mean of 3 timed wall-clock
+runs, 45.8 s → 20.0 s, both runs at the same default `-K` batch size so batching is
+identical) on a 5M-read WGS slice (HG00096, hg38), Graviton4 (NEON), clang-19. The
+compressed record stream is
+**byte-identical** to serial: htslib's ordered thread pool emits BGZF blocks in
+dispatch order (the same guarantee `samtools -@` relies on), so records decode
+identically and the compressed record bytes match — after excluding the `@PG CL:`
+line, which records the `--bam-threads` value and therefore differs between a
+serial and an explicit-thread invocation. `--bam-threads` shapes only `--bam`
+output: a positive value on SAM output (no `--bam`) is inert and prints a one-line
+`WARNING:`. Pass `--bam-threads N` to override (accepted range `[0, MAX_THREADS]`;
+an out-of-range or malformed value is rejected with a parse error, not clamped), or
+`--bam-threads 0` to force the previous single-threaded deflate.
+
 The implementation adds `src/bam_writer.{h,cpp}`, a new module that converts
 `mem_aln_t` to `bam1_t` via `mem_aln_to_bam`. htslib v1.21 is pulled in as a
 submodule at `ext/htslib`. On the bwameth.py example fixture (92,961 records),
