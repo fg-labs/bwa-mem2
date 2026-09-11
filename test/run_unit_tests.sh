@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Local unit-test harness for the five C++ binaries under test/.
-# Builds, indexes the phiX fixture, runs each binary, asserts exit 0
-# and non-empty output. No hash pinning — that lives in the CI workflow.
+# Local unit-test harness for the standalone C++ test binaries under test/
+# (the $(EXE) list in test/Makefile). Builds, indexes the phiX fixture, runs
+# each binary, asserts exit 0 and non-empty output. No hash pinning — that lives in the CI workflow.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -17,7 +17,7 @@ ok() { echo "OK:   $*"; }
 
 [[ -x "$BWAMEM3" ]] || fail "bwa-mem3 not built at $BWAMEM3 (run 'make' or 'make arm64' first)"
 
-# Build the five unit binaries.
+# Build the standalone test binaries.
 (cd "$HERE" && make) || fail "test/ make failed"
 
 # Build any test binaries that live outside test/Makefile.
@@ -199,6 +199,20 @@ if OUT="$(cd "$HERE" && ./sa_lookup_sentinel_parity_test "$FIXTURES/phix.fa" 2>&
 else
     echo "$OUT"
     fail "sa_lookup_sentinel_parity_test: non-zero exit"
+fi
+
+# --- backwardext_parity_test ----------------------------------------------
+# Full backwardExt (k, l, s) vs a scalar reference computed straight from the
+# checkpoint blocks, across block offsets, interval sizes and all four bases;
+# gates the arm64 vector occurrence path lane by lane, including the suffix
+# sum that feeds l.
+if OUT="$(cd "$HERE" && ./backwardext_parity_test "$FIXTURES/phix.fa" 2>&1)"; then
+    echo "$OUT" | grep -q "backwardExt PARITY PASS" \
+        || fail "backwardext_parity_test: no PASS line"
+    ok "backwardext_parity_test"
+else
+    echo "$OUT"
+    fail "backwardext_parity_test: non-zero exit"
 fi
 
 # --- long-read end-to-end (issue 44) --------------------------------------
