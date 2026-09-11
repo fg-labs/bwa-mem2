@@ -315,6 +315,83 @@ void check_meth_batch_matches_scalar(uint64_t seed, int n_pairs, int len_a, int 
                   len_a > len_b ? len_a : len_b);
 }
 
+// RAII override of an environment variable (see test_kswv_correctness.cpp): set
+// on construction, restore the prior value (or unset) on destruction so doctest
+// run order cannot leak a toggle into a sibling case.
+class ScopedEnv {
+public:
+    ScopedEnv(const char *name, const char *value) : name_(name) {
+        const char *cur = getenv(name);
+        had_ = cur != nullptr;
+        if (had_) saved_ = cur;
+        setenv(name, value, 1);
+    }
+    ~ScopedEnv() {
+        if (had_) setenv(name_.c_str(), saved_.c_str(), 1);
+        else      unsetenv(name_.c_str());
+    }
+    ScopedEnv(const ScopedEnv &) = delete;
+    ScopedEnv &operator=(const ScopedEnv &) = delete;
+private:
+    std::string name_;
+    std::string saved_;
+    bool had_ = false;
+};
+
+// Run one freed-cell (mat-aware, HasFreed) batch through make_kswv and return
+// one kswr_t per input pair, in input order. Mirrors compare_batch's kernel
+// plumbing but keeps the results for an A/B toggle comparison instead of
+// checking against scalar.
+std::vector<kswr_t> run_freed_config(const std::vector<bwa_tests::TestPair> &pairs,
+                                     const bwa_tests::ScoringMatrix &mat,
+                                     bool use16, int max_qlen) {
+    const int xtra = bwa_tests::default_xtra_flags(static_cast<int>(mat[0]));
+    bwa_tests::BatchBuffers bb(pairs, xtra);
+    auto pwsw = make_kswv(bwa_tests::DEFAULT_GAP_OPEN, bwa_tests::DEFAULT_GAP_EXTEND,
+                          bwa_tests::DEFAULT_GAP_OPEN, bwa_tests::DEFAULT_GAP_EXTEND,
+                          mat[0], mat[1], 1, kRefLen, max_qlen, mat.data());
+    REQUIRE(pwsw->needsScalar() == false);
+    // Drive BOTH phases, exactly as compare_batch does. Phase 0 writes
+    // score/score2/te/qe/te2 for every pair; phase 1 recovers tb/qb, but only
+    // for the survivors that clear the KSW_XSTART/KSW_XSUBO gate. Skipping phase
+    // 1 leaves tb/qb at their g_defr pre-seed (-1) in every config, so the
+    // caller's all-field parity check compares -1 == -1 and can never observe a
+    // ROWPAIR/LAZYQE regression in the phase-1 recovery -- the very path this
+    // helper exists to A/B.
+    if (use16) pwsw->getScores16(bb.pairs(), bb.ref_buf(), bb.qer_buf(), bb.aln(), bb.n(), 1, 0);
+    else       pwsw->getScores8 (bb.pairs(), bb.ref_buf(), bb.qer_buf(), bb.aln(), bb.n(), 1, 0);
+    const int survivors = bb.prepare_phase1();
+    REQUIRE(survivors > 0);   // else the phase-1 tb/qb comparison would be vacuous
+    // survivors > 0 alone is vacuous for the ragged-quantum contract: if every
+    // survivor shares one query length, the short/long lanes never coexist in a
+    // phase-1 group and the padding-column exposure this A/B helper exists to
+    // cover goes untested. Require each distinct input query length to have
+    // cleared the KSW_XSTART/KSW_XSUBO gate so both lengths reach the phase-1
+    // recovery below (mirrors compare_batch's survivor-length guard).
+    {
+        std::set<size_t> requested_qlens;
+        for (const auto &p : pairs) requested_qlens.insert(p.qry.size());
+        std::set<size_t> survivor_qlens;
+        for (int i = 0; i < survivors; i++) {
+            survivor_qlens.insert(pairs[bb.pairs()[i].regid].qry.size());
+        }
+        for (const size_t qlen : requested_qlens) {
+            CAPTURE(qlen);
+            REQUIRE(survivor_qlens.count(qlen) > 0);
+        }
+    }
+    if (use16) pwsw->getScores16(bb.pairs(), bb.ref_buf(), bb.qer_buf(), bb.aln(), survivors, 1, 1);
+    else       pwsw->getScores8 (bb.pairs(), bb.ref_buf(), bb.qer_buf(), bb.aln(), survivors, 1, 1);
+    // aln() is indexed by each pair's retained regid, which BatchBuffers assigns
+    // equal to the original input index; prepare_phase1 compacts pairs() but
+    // leaves aln() indexed by regid, so read the full records back in input order
+    // directly -- do NOT index through the now-compacted pairs() array.
+    std::vector<kswr_t> out;
+    out.reserve(bb.n());
+    for (int i = 0; i < bb.n(); i++) out.push_back(bb.aln()[i]);
+    return out;
+}
+
 } // namespace
 
 // The regression itself. 143 -> quantum 144 and 151 -> quantum 160, so the
@@ -437,6 +514,110 @@ TEST_CASE("kswv::getScores16 matches scalar on mixed-length --meth batches"
             }
         }
     }
+}
+
+// The freed-cell (--meth, HasFreed=true) instantiation carries the same two-row
+// sweep and lazy query-end recovery as the symmetric kernel, but no toggle-
+// parity case exercised it: run_kswv_batch (test_kswv_correctness.cpp) builds
+// only a symmetric matrix, so the ROWPAIR/LAZYQE A/B there never reaches
+// HasFreed. Drive a bisulfite-converted batch through the freed kernel in each
+// of the three configurations -- one-row, two-row inline, two-row lazy -- and
+// require strict all-field equality. 143 -> quantum 144 and 151 -> quantum 160
+// give ragged, odd partial blocks, so the two-row sweep's odd-tail branch fires.
+TEST_CASE("kswv --meth freed cell: ROWPAIR/LAZYQE configurations agree"
+          * doctest::test_suite("unit/kswv")) {
+#if !defined(__ARM_NEON) && !defined(__aarch64__)
+    MESSAGE("skipped: the toggles affect the NEON rescue kernels only");
+    return;
+#else
+    auto run_meth_toggle_parity = [](int scoring, bool ot, bool use16) {
+        const bwa_tests::ScoringMatrix mat =
+            use16 ? meth_matrix(scoring, ot, 14, 8) : meth_matrix(scoring, ot, 1, 4);
+        // Guard against a vacuous meth leg: the matrix must actually free a cell,
+        // else make_kswv would pick HasFreed=false and re-run the symmetric path.
+        const int conv_idx = ot ? (1 * 5 + 3) : (2 * 5 + 0);
+        REQUIRE(mat[conv_idx] != mat[0 * 5 + 1]);
+        if (!batched_kswv_available() || !freed_kernel_available(mat)) {
+            MESSAGE("tier has no freed-cell kswv kernel; skipping a leg");
+            return;
+        }
+        std::mt19937 rng(97531u + static_cast<unsigned>(scoring) * 7
+                         + (ot ? 1u : 0u) + (use16 ? 100u : 0u));
+        auto pairs = mixed_len_batch(rng, 129, 143, 151);
+        for (auto &p : pairs) convert_query_bisulfite(rng, p, ot);
+        const int max_qlen = 151;
+
+        std::vector<kswr_t> one_row, pair_inline, pair_lazy;
+        {
+            ScopedEnv rp("BWA3_RESCUE_ROWPAIR", "0");
+            ScopedEnv lq("BWA3_RESCUE_LAZYQE", "1");
+            // Anchor the one-row leg to the scalar oracle so this case is not a
+            // pure self-consistency check: three-way config parity alone cannot
+            // detect a defect shared by all three configurations. compare_batch
+            // drives the freed kernel through both phases and compares every
+            // field (score/score2/te/qe/te2/tb/qb) against the scalar reference;
+            // the all_eq parity checks below then pin the remaining two configs
+            // to this independently-verified one.
+            compare_batch(0, pairs, mat, mat.data(), use16, max_qlen);
+            one_row = run_freed_config(pairs, mat, use16, max_qlen);
+        }
+        {
+            ScopedEnv rp("BWA3_RESCUE_ROWPAIR", "1");
+            {
+                ScopedEnv lq("BWA3_RESCUE_LAZYQE", "0");
+                pair_inline = run_freed_config(pairs, mat, use16, max_qlen);
+            }
+            {
+                ScopedEnv lq("BWA3_RESCUE_LAZYQE", "1");
+                pair_lazy = run_freed_config(pairs, mat, use16, max_qlen);
+            }
+        }
+        REQUIRE(one_row.size() == pair_inline.size());
+        REQUIRE(one_row.size() == pair_lazy.size());
+
+        auto all_eq = [](const kswr_t &a, const kswr_t &b) {
+            return a.score == b.score && a.te == b.te && a.qe == b.qe
+                && a.score2 == b.score2 && a.te2 == b.te2
+                && a.tb == b.tb && a.qb == b.qb;
+        };
+        int drift_inline = 0, drift_lazy = 0;
+        for (size_t i = 0; i < one_row.size(); i++) {
+            if (!all_eq(one_row[i], pair_inline[i])) {
+                ++drift_inline;
+                CAPTURE(i); CAPTURE(scoring); CAPTURE(ot); CAPTURE(use16);
+                CHECK(all_eq(one_row[i], pair_inline[i]));
+            }
+            if (!all_eq(one_row[i], pair_lazy[i])) {
+                ++drift_lazy;
+                CAPTURE(i); CAPTURE(scoring); CAPTURE(ot); CAPTURE(use16);
+                CHECK(all_eq(one_row[i], pair_lazy[i]));
+            }
+        }
+        MESSAGE("meth freed toggle scoring=" << scoring << " ot=" << ot
+                << " use16=" << use16 << ": inline drift=" << drift_inline
+                << ", lazy drift=" << drift_lazy << " over " << one_row.size()
+                << " pairs");
+        CHECK(drift_inline == 0);
+        CHECK(drift_lazy == 0);
+    };
+
+    // One SUBCASE per (scoring, strand, width) variant so a REQUIRE tripping in
+    // one configuration does not abort the remaining eleven -- matching the flat-
+    // SUBCASE convention used elsewhere in the kswv suite
+    // (test_kswv_correctness.cpp).
+    SUBCASE("GENOMIC OT u8")    { run_meth_toggle_parity(MEM_METH_SCORING_GENOMIC,   true,  false); }
+    SUBCASE("GENOMIC OT u16")   { run_meth_toggle_parity(MEM_METH_SCORING_GENOMIC,   true,  true);  }
+    SUBCASE("GENOMIC OB u8")    { run_meth_toggle_parity(MEM_METH_SCORING_GENOMIC,   false, false); }
+    SUBCASE("GENOMIC OB u16")   { run_meth_toggle_parity(MEM_METH_SCORING_GENOMIC,   false, true);  }
+    SUBCASE("NEUTRAL OT u8")    { run_meth_toggle_parity(MEM_METH_SCORING_NEUTRAL,   true,  false); }
+    SUBCASE("NEUTRAL OT u16")   { run_meth_toggle_parity(MEM_METH_SCORING_NEUTRAL,   true,  true);  }
+    SUBCASE("NEUTRAL OB u8")    { run_meth_toggle_parity(MEM_METH_SCORING_NEUTRAL,   false, false); }
+    SUBCASE("NEUTRAL OB u16")   { run_meth_toggle_parity(MEM_METH_SCORING_NEUTRAL,   false, true);  }
+    SUBCASE("COLLAPSED OT u8")  { run_meth_toggle_parity(MEM_METH_SCORING_COLLAPSED, true,  false); }
+    SUBCASE("COLLAPSED OT u16") { run_meth_toggle_parity(MEM_METH_SCORING_COLLAPSED, true,  true);  }
+    SUBCASE("COLLAPSED OB u8")  { run_meth_toggle_parity(MEM_METH_SCORING_COLLAPSED, false, false); }
+    SUBCASE("COLLAPSED OB u16") { run_meth_toggle_parity(MEM_METH_SCORING_COLLAPSED, false, true);  }
+#endif
 }
 
 #endif // BWA_TESTS_HAVE_KSWV

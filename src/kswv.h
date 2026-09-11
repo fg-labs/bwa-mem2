@@ -325,8 +325,10 @@ private:
 
 	/* Templated u8 kernel body. When HasFreed, applies the freed-cell
 	 * (fr_ref x fr_read -> fr_val) override per cell; otherwise the override
-	 * blocks compile out entirely. */
-	template<bool HasFreed, bool USQADD, bool RowPair>
+	 * blocks compile out entirely. LazyQE selects, for the two-row sweep only,
+	 * post-row query-end recovery from the stored H (true) over the per-cell
+	 * argmax blend (false); it is meaningless when RowPair is false. */
+	template<bool HasFreed, bool USQADD, bool RowPair, bool LazyQE>
 	int kswv_neon_u8_impl(uint8_t seq1SoA[],
 					      uint8_t seq2SoA[],
 					      int16_t nrow,
@@ -359,7 +361,10 @@ private:
                      int phase);
 
 	/* Templated i16 kernel body; see kswv_neon_u8_impl. */
-	template<bool HasFreed>
+	/* Templated 16-bit kernel body. RowPair / LazyQE mirror the u8 kernel's
+	 * two-row sweep and its lazy query-end recovery (LazyQE is meaningless
+	 * when RowPair is false; the one-row body is always lazy). */
+	template<bool HasFreed, bool RowPair, bool LazyQE>
 	int kswv_neon_16_impl(int16_t seq1SoA[],
                           int16_t seq2SoA[],
                           int16_t nrow,
@@ -583,6 +588,16 @@ private:
 	 * QE_MAXBLK sizes the checkpoint array against -- see the QE_BLK comment in
 	 * kswv.cpp. */
 	uint8_t *colIdx8;
+
+	/* 16-bit twins for the NEON 16-bit kernel's lazy query-end recovery:
+	 * colIdx16[j*W16 + k] == (int16_t) j, and qeBlk16 holds TWO rows' worth of
+	 * per-QE_BLK running-max checkpoints (row i at qeBlk16, row i+1 at
+	 * qeBlk16 + qeBlk16Stride) for the two-row sweep. Both are sized from
+	 * maxQerLen in the constructor: unlike the u8 kernels the 16-bit tier has
+	 * no 256-column admission bound, so a fixed stack array would not do. */
+	int16_t *colIdx16;
+	int16_t *qeBlk16;
+	int32_t  qeBlk16Stride;
 
 	int16_t *F16;
 	int16_t *H16_0, *H16_1;
