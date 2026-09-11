@@ -446,9 +446,9 @@ jobs:
         run: |
           if [ "${{ matrix.arch_flag }}" = "" ]; then
             make bns_zero_calloc_test arch=${{ matrix.baseline_arch || 'avx2' }} \
-              CXX=${{ matrix.cxx || 'clang++-19' }}
+              CXX=${{ matrix.cxx || 'clang++-19' }} USE_MIMALLOC=${{ matrix.use_mimalloc }}
           else
-            make bns_zero_calloc_test arch=${{ matrix.arch_flag }} CXX=${{ matrix.cxx || 'clang++-19' }}
+            make bns_zero_calloc_test arch=${{ matrix.arch_flag }} CXX=${{ matrix.cxx || 'clang++-19' }} USE_MIMALLOC=${{ matrix.use_mimalloc }}
           fi
           ./bns_zero_calloc_test
 
