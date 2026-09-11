@@ -54,6 +54,7 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
 #include "meth_xm.h"   /* meth_chem_t for --meth=emseq|taps */
 #include "stage_prof.h"
 #include "seed_order.h"
+#include "kstring.h"   /* kstring_t/kputs: the --compat divergence-guard flag list */
 #include "version.h"
 #include <sys/resource.h>
 #include "bwa_shm.h"
@@ -1567,9 +1568,16 @@ static void usage(const mem_opt_t *opt)
     fprintf(stderr, "                  v2.2.1 forked at bwa 0.7.17, before either landed.\n");
     fprintf(stderr, "                  bwa-mem:  keep both -- bwa 0.7.18+ emits them. Pinned at 0.7.19.\n");
     fprintf(stderr, "                  Shapes output only; changes no alignment. @PG still differs (it\n");
-    fprintf(stderr, "                  is run-specific) -- exclude it when comparing. Mutually exclusive\n");
-    fprintf(stderr, "                  with --fast (which changes alignments) and with --meth (neither\n");
-    fprintf(stderr, "                  target has a bisulfite mode) -- combining them is an error [off]\n");
+    fprintf(stderr, "                  is run-specific) -- exclude it when comparing. Rejects any\n");
+    fprintf(stderr, "                  bwa-mem3-only lever that changes alignments/MAPQ (e.g. --smem-dedup,\n");
+    fprintf(stderr, "                  --adaptive-band, --max-extend-chains, --min-ext-len, --rescue-kmer,\n");
+    fprintf(stderr, "                  --seed-order); --fast and --meth are always refused, the rest can\n");
+    fprintf(stderr, "                  be forced with --compat-allow-divergent [off]\n");
+    fprintf(stderr, "    --compat-allow-divergent  with --compat, downgrade the divergent-lever refusal\n");
+    fprintf(stderr, "                  to a warning: keep the target's OUTPUT CONVENTIONS while running a\n");
+    fprintf(stderr, "                  bwa-mem3-only lever. Output is then NOT byte-identical to the\n");
+    fprintf(stderr, "                  target. Does not relax --fast/--meth (category errors, not\n");
+    fprintf(stderr, "                  divergences). No effect without --compat [off]\n");
     fprintf(stderr, "Scoring options:\n");
     fprintf(stderr, "   -A INT        score for a sequence match, which scales options -TdBOELU unless overridden [%d]\n", opt->a);
     fprintf(stderr, "   -B INT        penalty for a mismatch [%d]\n", opt->b);
@@ -1698,9 +1706,10 @@ static void usage(const mem_opt_t *opt)
     fprintf(stderr, "   --proper-pair-from-emitted\n");
     fprintf(stderr, "                 derive the proper-pair FLAG bit (0x2) from the alignment actually\n");
     fprintf(stderr, "                 emitted rather than the top-scoring one. bwa and bwa-mem2 both use\n");
-    fprintf(stderr, "                 the top-scoring one, so this deviates from both and is mutually\n");
-    fprintf(stderr, "                 exclusive with --compat. Has no effect unless the index has a .alt\n");
-    fprintf(stderr, "                 sidecar: the two differ only for reads with ALT hits [off]\n");
+    fprintf(stderr, "                 the top-scoring one, so this deviates from both; --compat refuses\n");
+    fprintf(stderr, "                 it by default (override with --compat-allow-divergent). Has no\n");
+    fprintf(stderr, "                 effect unless the index has a .alt sidecar: the two differ only\n");
+    fprintf(stderr, "                 for reads with ALT hits [off]\n");
     fprintf(stderr, "Seed ordering (fg-labs extension):\n");
     fprintf(stderr, "   --seed-order STR\n");
     fprintf(stderr, "                 seed emission order before chaining: off|local-longest [off]\n");
@@ -1799,6 +1808,9 @@ int main_mem(int argc, char *argv[])
     char        *p, *rg_line               = 0, *hdr_line = 0;
     const char  *mode                      = 0;
     int          fast                      = 0;
+    int          allow_divergent           = 0;   /* --compat-allow-divergent: downgrade the
+                                                    * overridable --compat divergence guard from a
+                                                    * hard error to a warning (see the guard below) */
     int          want_huge_pages           = 0;
     /* --chunk-cap: upper bound (bases) on the default `chunk_size * n_threads`
      * batch size. 0 = off, which is the DEFAULT and matches bwa and bwa-mem2
@@ -1956,6 +1968,7 @@ int main_mem(int argc, char *argv[])
         OPT_NO_BAND_CERT,
         OPT_EXTEND_MATE_CONCORDANT,
         OPT_COMPAT,
+        OPT_COMPAT_ALLOW_DIVERGENT,
         OPT_CHUNK_CAP,
         OPT_COHORT_SLICES,
         OPT_RESCUE_KMER,
@@ -2009,6 +2022,7 @@ int main_mem(int argc, char *argv[])
         {"proper-pair-from-emitted", no_argument,       0, OPT_PROPER_PAIR_FROM_EMITTED},
         {"seed-order",               required_argument, 0, OPT_SEED_ORDER},
         {"compat",                   required_argument, 0, OPT_COMPAT},
+        {"compat-allow-divergent",   no_argument,       0, OPT_COMPAT_ALLOW_DIVERGENT},
         {"legacy-reader",            no_argument,       0, OPT_LEGACY_READER},
         {"hic",                      no_argument,       0, OPT_HIC},
 #ifdef STAGE_PROF
@@ -2363,6 +2377,7 @@ int main_mem(int argc, char *argv[])
             opt->supp_rep_hard_cap = (int)v;
         }
         else if (c == OPT_LEGACY_READER) aux.legacy_reader = 1;
+        else if (c == OPT_COMPAT_ALLOW_DIVERGENT) allow_divergent = 1;
         else if (c == OPT_SEED_ORDER) {
             opt->seed_emit_order = seed_order_from_str(optarg);
             if ((int)opt->seed_emit_order < 0) {
@@ -2812,20 +2827,6 @@ int main_mem(int argc, char *argv[])
         if (out_opened) fclose(aux.fp);
         return 1;
     }
-    /* --proper-pair-from-emitted deliberately derives FLAG 0x2 differently from
-     * both upstreams (fg-labs/bwa-mem3#17, #362), so pairing it with a --compat
-     * target asks for byte-identity and for a documented deviation from it in
-     * the same command. Same shape as --fast above: refuse rather than emit a
-     * stream that diffs clean everywhere except the ALT records. */
-    if (opt->proper_pair_from_emitted && compat_on) {
-        fprintf(stderr, "[E::%s] --compat and --proper-pair-from-emitted are mutually exclusive: "
-                "--compat targets byte-identical %s output, but --proper-pair-from-emitted "
-                "derives FLAG 0x2 from the emitted alignment, which %s does not\n",
-                __func__, opt->compat->name, opt->compat->name);
-        free(opt);
-        if (out_opened) fclose(aux.fp);
-        return 1;
-    }
     /* --compat is an output-parity target, but no target has a bisulfite mode,
      * so "byte-identical" is undefined under --meth, which also emits
      * meth-specific tags that no target models. Reject the combination rather
@@ -2838,47 +2839,121 @@ int main_mem(int argc, char *argv[])
         if (out_opened) fclose(aux.fp);
         return 1;
     }
-    /* The score-gated chain-extension cap (--extend-tie-frac / --extend-tie-floor
-     * / --extend-csub) prunes chains before banded-SW and reseeds the pruned
-     * competitor into MAPQ, so a setting that can actually prune a chain changes
-     * alignments and MAPQ exactly as --fast does. It is folded into --fast
-     * (already rejected above), but the levers are also settable on their own,
-     * so a command such as `--compat=bwa-mem2 --extend-tie-frac=0.95 --extend-csub`
-     * would otherwise emit a diff-clean-looking stream over genuinely
-     * non-compatible alignments.
+    /* Centralized --compat divergence guard.
      *
-     * Reject only configurations that can actually prune (mem_chain_cap_extend /
-     * mem_chain_cap_extend_mate in bwamem.cpp):
-     *  - extend_tie_frac > 0 gates on its own, independent of --max-extend-chains
-     *    (cap_on), so any nonzero value is unsafe by itself.
-     *  - extend_tie_floor only ever changes a keep decision when the fraction
-     *    gate is active (with tie_frac <= 0 the gate is 0, so `w[i] >= gate` is
-     *    always true and the floor comparison never matters) -- a bare floor is
-     *    always a no-op and must not trip the guard.
-     *  - extend_csub only has an effect once a chain was actually dropped
-     *    (capped_w != 0). With extend_tie_frac == 0 that still happens whenever
-     *    --max-extend-chains is explicitly set (the plain count cap populates
-     *    capped_w on its own), so csub is unsafe there too, even though the
-     *    count cap itself is a pre-existing, separately-scoped lever.
+     * --compat is a byte-identity contract: output must match the named upstream
+     * (bwa-mem / bwa-mem2) byte for byte. Any bwa-mem3-only lever the upstream
+     * cannot itself express necessarily diverges from it, so pairing one with
+     * --compat would emit a diff-clean-looking stream over genuinely different
+     * alignments/MAPQ -- defeating the parity-validation purpose of --compat.
      *
-     * Compared by value, not opt0: an explicit `--extend-tie-frac 0` resolves to
-     * the byte-identical off-state and must not trip the guard. */
-    if (compat_on &&
-        (opt->extend_tie_frac != 0.0f ||
-         (opt->extend_csub != 0 && opt->max_extend_chains != 0))) {
-        fprintf(stderr, "[E::%s] --compat and the chain-extension cap "
-                "(--extend-tie-frac, or --extend-csub combined with "
-                "--max-extend-chains) are mutually exclusive: --compat targets "
-                "byte-identical %s output, but these levers prune chains and "
-                "recalibrate MAPQ, which changes alignments\n",
-                __func__, opt->compat->name);
-        free(opt);
-        if (out_opened) fclose(aux.fp);
-        return 1;
+     * --fast and --meth are refused UNCONDITIONALLY above: --fast is an opaque
+     * multi-flag bundle (not a single knob a user could sanely override), and no
+     * target has a bisulfite mode, so "byte-identical to X under --meth" is
+     * undefined, not merely violated. Those are category errors, not divergences.
+     *
+     * The levers below "merely diverge": the target has the same behavioural axis,
+     * the bwa-mem3 lever just moves off the compatible point. They are refused by
+     * default too, but --compat-allow-divergent downgrades the refusal to a
+     * warning for a user who knowingly wants the target's OUTPUT CONVENTIONS with
+     * one bwa-mem3 lever engaged (output is then NOT byte-identical, which the
+     * @PG CL: record already documents via argv).
+     *
+     * Every predicate is read HERE, before the --fast preset below applies, so a
+     * nonzero/true value reflects only the user's own flag -- the mem_opt_init
+     * defaults are all the byte-identical off-state. Compared by value, not opt0:
+     * an explicit off-value (e.g. --extend-tie-frac 0) is the byte-identical
+     * off-state and must not trip the guard.
+     *
+     * Riders deliberately NOT listed (each is a no-op unless a lever that IS
+     * listed is also engaged, so the listed lever already guards them):
+     *  - --extend-csub / --extend-mate-concordant : only bite once a chain is
+     *    dropped, which needs --extend-tie-frac>0 or --max-extend-chains!=0.
+     *  - --extend-tie-floor : a no-op while --extend-tie-frac is 0.
+     *  - --rescue-skip / --rescue-band : no-ops without --rescue-kmer.
+     *
+     * --chunk-cap is guarded on the explicit opt-in (any nonzero cap), NOT on
+     * whether the cap would actually re-partition at the current -t (cap engages
+     * only when chunk_size*n_threads > cap; -K pins the size and bypasses it). A
+     * cap is -t-fragile -- byte-identical at one thread count, divergent at
+     * another -- so the safe direction for a byte-identity contract is to reject
+     * any explicit cap outright and let --compat-allow-divergent keep a
+     * known-harmless one, rather than silently pass a run that a different -t
+     * would break.
+     *
+     * To add a knob: add one row (keep it in sync with the "NOT byte-identical"
+     * levers in the help above). */
+    if (compat_on) {
+        const struct { int active; const char *flag; } divergent[] = {
+            { opt->extend_tie_frac != 0.0f,           "--extend-tie-frac" },
+            { opt->max_extend_chains != 0,            "--max-extend-chains" },
+            { opt->min_ext_len != 0,                  "--min-ext-len" },
+            { opt->smem_dedup != 0,                   "--smem-dedup" },
+            { opt->band_start != 0,                   "--adaptive-band" },
+            { opt->rescue_kmer != 0,                  "--rescue-kmer" },
+            { opt->supp_rep_hard_cap != 0,            "--supp-rep-hard-cap" },
+            { opt->seed_emit_order != SEED_ORDER_OFF, "--seed-order" },
+            { opt->skip_contained_ext != 0,           "--skip-contained-ext" },
+            { chunk_cap_set && chunk_cap > 0,         "--chunk-cap" },
+            { opt->proper_pair_from_emitted != 0,     "--proper-pair-from-emitted" },
+        };
+        /* Build the flag list with a single checked allocation up front: kstring's
+         * auto-grow path assigns realloc() straight back onto its buffer and then
+         * dereferences it, so an allocation failure there would leak the old buffer
+         * and crash on a NULL write. Summing the exact size in the same pass that
+         * counts active flags keeps the buffer decoupled from the rows above -- add
+         * a row without hand-sizing it -- while giving one clean OOM diagnostic. */
+        kstring_t joined = { 0, 0, 0 };
+        int n_active = 0;
+        size_t need = 1;   /* trailing NUL */
+        for (size_t i = 0; i < sizeof(divergent) / sizeof(divergent[0]); ++i) {
+            if (!divergent[i].active) continue;
+            if (n_active > 0) ++need;   /* ' ' separator */
+            need += strlen(divergent[i].flag);
+            ++n_active;
+        }
+        if (n_active > 0) {
+            joined.s = (char *)malloc(need);
+            if (joined.s == NULL) {
+                fprintf(stderr, "[E::%s] out of memory building the --compat "
+                        "divergence flag list\n", __func__);
+                free(opt);
+                if (out_opened) fclose(aux.fp);
+                return 1;
+            }
+            joined.m = need;
+            /* Buffer is pre-sized, so the unsafe (realloc-free) appenders are safe
+             * here; the trailing NUL is written once, below. */
+            for (size_t i = 0, written = 0; i < sizeof(divergent) / sizeof(divergent[0]); ++i) {
+                if (!divergent[i].active) continue;
+                if (written > 0) kputc_u(' ', &joined);
+                kputs_u(divergent[i].flag, &joined);
+                ++written;
+            }
+            joined.s[joined.l] = '\0';
+
+            if (allow_divergent) {
+                fprintf(stderr, "[W::%s] --compat-allow-divergent: proceeding with %s under "
+                        "--compat=%s; output is NOT byte-identical to %s\n",
+                        __func__, joined.s, opt->compat->name, opt->compat->name);
+            } else {
+                fprintf(stderr, "[E::%s] --compat and these bwa-mem3-only levers are mutually "
+                        "exclusive: %s. --compat targets byte-identical %s output, but these "
+                        "change alignments/MAPQ. Drop them, or pass --compat-allow-divergent to "
+                        "keep --compat=%s's output conventions with them engaged (output will NOT "
+                        "be byte-identical)\n",
+                        __func__, joined.s, opt->compat->name, opt->compat->name);
+                free(joined.s);
+                free(opt);
+                if (out_opened) fclose(aux.fp);
+                return 1;
+            }
+        }
+        free(joined.s);   /* NULL when nothing was appended -- free(NULL) is a no-op */
     }
     /* --compat with an @HD in -H: WARN, do not reject. Emitted only after every
-     * rejection above (--fast, --proper-pair-from-emitted, --meth), so a run
-     * that is about to be refused does not also collect a warning about how its
+     * rejection above (--fast, --meth, and the centralized divergence guard), so
+     * a run that is about to be refused does not also collect a warning about how its
      * header would have been ordered. A new --compat guard belongs above this
      * comment, not below it.
      *
