@@ -52,11 +52,10 @@ use onto NEON), sets the NEON lane widths (`SIMD_WIDTH8 = 16`,
 `SIMD_WIDTH16 = 8`), defines a `posix_memalign`-backed `_mm_malloc`
 replacement that enforces the configurable `CACHE_LINE_BYTES` alignment
 (128 on Apple Silicon, overridable to 64 for Neoverse/Graviton), and
-provides two native-NEON helpers that sse2neon does not generate
+provides a native-NEON helper that sse2neon does not generate
 efficiently:
 
 - `_mm_movemask_epi16` — extracts the MSB of each 16-bit element using `vshrq_n_s16` + `vmovn_u16` + position-weighted `vaddv_u8`, replacing the `_mm_movemask_epi8(v) & 0xAAAA` pattern used in `bandedSWA.cpp`.
-- `_mm_blendv_epi16_fast` — a bitwise select on 16-bit elements via NEON `vbslq_s16`, replacing the OR/AND/ANDNOT sequence sse2neon emits for `_mm_blendv_epi8`.
 
 `SIMD_WIDTH8` and `SIMD_WIDTH16` control the lane counts in `kswv.cpp`
 and `bandedSWA.cpp`. The kernel headers select these values per ISA;
@@ -159,7 +158,7 @@ flowchart TD
 | Kernel | SSE4.1 | SSE4.2 | AVX | AVX2 | AVX-512BW | ARM NEON |
 |---|---|---|---|---|---|---|
 | `kswv` (batched Smith-Waterman) | 8-wide int16 | 8-wide int16 | 8-wide int16 | 16-wide int16 | 32-wide int16 | 8-wide int16 (native) |
-| `bandedSWA` (banded SW / mate-rescue) | vectorised | vectorised | vectorised | vectorised | vectorised | native NEON blendv |
+| `bandedSWA` (banded SW / mate-rescue) | vectorised | vectorised | vectorised | vectorised | vectorised | native NEON movemask |
 | `ksw_*` free functions (SW extension) | per-tier | per-tier | per-tier | per-tier | per-tier | per-tier (NEON) |
 | `sam_encode` (SAM seq/qual encoder) | per-tier | per-tier | per-tier | per-tier | per-tier | per-tier (NEON) |
 | `FMI_search` (FM-index backward ext.) | scalar | scalar | scalar | scalar | scalar | scalar |

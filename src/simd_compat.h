@@ -35,8 +35,8 @@
  * ARM/sse2neon compatibility shim -- ARM targets ONLY.
  *
  * This header is the sse2neon-based SSE->NEON translation layer plus the
- * native-NEON hot-path helpers (_mm_movemask_epi16, _mm_blendv_epi16_fast) and
- * ARM aligned-allocation macros. It is NOT a cross-tier SIMD abstraction: every
+ * native-NEON hot-path helper (_mm_movemask_epi16). It is NOT a cross-tier SIMD
+ * abstraction: every
  * consumer includes it only under `#if defined(__ARM_NEON) || defined(__aarch64__)`,
  * so on x86 it is never seen and x86 uses <immintrin.h> directly. The `#else`
  * guard below enforces that invariant -- do not add x86/AVX/SSE branches here.
@@ -152,18 +152,6 @@
         return (int)vaddv_u8(vand_u8(narrow, bit_mask));
     }
 
-    /*
-     * Optimized blendv for 16-bit elements using NEON vbsl (bitwise select).
-     * This is more efficient than sse2neon's _mm_blendv_epi8 for 16-bit data.
-     */
-    static inline __m128i _mm_blendv_epi16_fast(__m128i x, __m128i y, __m128i mask) {
-        /* Use vbsl: select y where mask bits are 1, else x */
-        return vreinterpretq_m128i_s16(
-            vbslq_s16(vreinterpretq_u16_m128i(mask),
-                      vreinterpretq_s16_m128i(y),
-                      vreinterpretq_s16_m128i(x)));
-    }
-
 #else
     /* This header is the ARM/sse2neon compatibility shim only. It must never be
      * compiled on a non-ARM target: on x86 the consumers include <immintrin.h>
@@ -171,13 +159,5 @@
      * regressed -- fail loudly rather than silently first-activating dead code. */
     #error "simd_compat.h is ARM-only; include it under #if defined(__ARM_NEON) || defined(__aarch64__)"
 #endif
-
-/* ARM aligned allocation macro.
- * The minimum alignment is the cache-line size: 128 on Apple Silicon,
- * overridable to 64 for Neoverse/Graviton via -DCACHE_LINE_BYTES=64. The header
- * is ARM-only (enforced by the `#error` guard above), so these are defined
- * unconditionally rather than behind an x86/ARM fork. */
-#define SIMD_ALIGNED_ALLOC(size, align) _mm_malloc_compat(size, (align) < CACHE_LINE_BYTES ? CACHE_LINE_BYTES : (align))
-#define SIMD_ALIGNED_FREE(ptr) free(ptr)
 
 #endif /* SIMD_COMPAT_H */

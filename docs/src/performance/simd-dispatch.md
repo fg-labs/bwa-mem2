@@ -76,7 +76,7 @@ For arm64 builds:
 | Kernel | SSE4.1 | SSE4.2 | AVX | AVX2 | AVX-512BW | NEON (arm64) |
 |---|---|---|---|---|---|---|
 | `kswv` (vectorized Smith-Waterman) | 8-wide int16 | 8-wide int16 | 8-wide int16 | 16-wide int16 | 32-wide int16 | 8-wide int16 (native) |
-| `bandedSWA` (banded alignment / mate-rescue) | vectorized | vectorized | vectorized | vectorized | vectorized | native NEON blendv |
+| `bandedSWA` (banded alignment / mate-rescue) | vectorized | vectorized | vectorized | vectorized | vectorized | native NEON movemask |
 | `ksw_*` (SW extension free functions) | per-tier | per-tier | per-tier | per-tier | per-tier | per-tier (NEON) |
 | `sam_encode` (SAM seq/qual encoder) | per-tier | per-tier | per-tier | per-tier | per-tier | per-tier (NEON) |
 | FM-index lookup (`FMI_search`) | scalar popcount | scalar popcount | scalar popcount | scalar popcount | scalar popcount | `__builtin_popcountl` |

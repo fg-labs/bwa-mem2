@@ -268,7 +268,7 @@ ifneq ($(IS_ARM),)
     # with ARM_CACHE_LINE=64.
     ARM_CACHE_LINE ?= 128
     # Reject unsupported alignments before they reach CACHE_LINE_BYTES. An
-    # invalid value would make SIMD_ALIGNED_ALLOC call posix_memalign with a bad
+    # invalid value would make _mm_malloc call posix_memalign with a bad
     # alignment, which returns EINVAL/NULL and is then dereferenced unchecked in
     # the kswv constructor. CACHE_LINE_BYTES must be exactly one supported value:
     # guard the token count first ($(filter) matches per word, so a multi-token
