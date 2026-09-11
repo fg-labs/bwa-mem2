@@ -1421,7 +1421,28 @@ void BandedPairWiseSW::smithWaterman256_8(uint8_t seq1SoA[],
         // row (ierow), absolute-frame score tracking, and the z-drop test — all
         // done in wide scalars so row distances that exceed int8 for long reads
         // are handled exactly.
-        {
+        //
+        // Run the block only on rows where some lane can actually change:
+        //   * xrow / best_abs change only where cmp is set (the global max
+        //     advanced this row; best_abs is always >= the byte max otherwise,
+        //     so max(best_abs, ms) is the identity);
+        //   * gbest_abs / ierow change only where qfire is set;
+        //   * a lane can z-drop only if drop - dif > zdrop with dif >= 0, so
+        //     drop > zdrop is necessary, and drop = maxScore - maxRS1 is exact
+        //     in bytes on alive lanes (both are [0,255] under the routing
+        //     envelope). subs_epu8 twice: nonzero iff drop > zdrop. Dead lanes
+        //     may read as "needed"; the block masks them with exit as before,
+        //     so that only costs a skipped skip. When zdrop is 0 the kill is
+        //     never applied, so the term is dropped from the gate. A zdrop
+        //     above 255 truncates in the byte broadcast to a smaller value, so
+        //     the gate opens on a superset of rows: still byte-identical.
+        // Byte-identical: when the gate is clear every store below is a no-op.
+        const __m256i need_z = (zdrop > 0)
+            ? _mm256_subs_epu8(_mm256_subs_epu8(maxScore256, maxRS1), zdrop256)
+            : zero256;
+        const __m256i need_any = _mm256_or_si256(_mm256_or_si256(cmp, qfire256), need_z);
+        const bool need_wide = !_mm256_testz_si256(need_any, need_any);
+        if (need_wide) {
             int8_t  cmp_a[SIMD_WIDTH8]      __attribute((aligned(32)));
             int8_t  y1_a[SIMD_WIDTH8]       __attribute((aligned(32)));
             int8_t  y_a[SIMD_WIDTH8]        __attribute((aligned(32)));
@@ -3329,7 +3350,29 @@ void BandedPairWiseSW::smithWaterman512_8(uint8_t seq1SoA[],
         // row (ierow), absolute-frame score tracking, and the z-drop test — all
         // done in wide scalars so row distances that exceed int8 for long reads
         // are handled exactly.
-        {
+        //
+        // Run the block only on rows where some lane can actually change:
+        //   * xrow / best_abs change only where cmp is set (the global max
+        //     advanced this row; best_abs is always >= the byte max otherwise,
+        //     so max(best_abs, ms) is the identity);
+        //   * gbest_abs / ierow change only where qfire is set;
+        //   * a lane can z-drop only if drop - dif > zdrop with dif >= 0, so
+        //     drop > zdrop is necessary, and drop = maxScore - maxRS1 is exact
+        //     in bytes on alive lanes (both are [0,255] under the routing
+        //     envelope). subs_epu8 twice: nonzero iff drop > zdrop. Dead lanes
+        //     may read as "needed"; the block masks them with exit as before,
+        //     so that only costs a skipped skip. When zdrop is 0 the kill is
+        //     never applied, so the term is dropped from the gate. A zdrop
+        //     above 255 truncates in the byte broadcast to a smaller value, so
+        //     the gate opens on a superset of rows: still byte-identical.
+        // Byte-identical: when the gate is clear every store below is a no-op.
+        const __mmask64 qf64 = _mm512_movepi8_mask(qfire512);
+        const __mmask64 need_z = (zdrop > 0)
+            ? _mm512_test_epi8_mask(_mm512_subs_epu8(_mm512_subs_epu8(maxScore512, maxRS1), zdrop512),
+                                    ff512)
+            : 0;
+        const bool need_wide = (cmp | qf64 | need_z) != 0;
+        if (need_wide) {
             // Only the int32 DATA channels need materializing as byte arrays; the
             // cmp/qfire/exit per-lane predicates are read straight from the cmp
             // __mmask64 and movepi8_mask(qfire512)/movepi8_mask(exit0) below.
@@ -3354,7 +3397,6 @@ void BandedPairWiseSW::smithWaterman512_8(uint8_t seq1SoA[],
             const __m512i vzd  = _mm512_set1_epi32(zdrop);
             const __m512i vedel = _mm512_set1_epi32(this->e_del);
             const __m512i veins = _mm512_set1_epi32(this->e_ins);
-            const __mmask64 qf64 = _mm512_movepi8_mask(qfire512);
             const __mmask64 ex64 = _mm512_movepi8_mask(exit0);
             __mmask64 die64 = 0;
             for (int g = 0; g < SIMD_WIDTH8 / 16; g++) {
