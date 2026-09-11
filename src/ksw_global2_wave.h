@@ -745,9 +745,29 @@ static int ksw_g2_wave(int qlen,const uint8_t*query,int tlen,const uint8_t*targe
 	int*zoff=S.zoff.data(),*ziS=S.ziS.data(); long roff=0;
 	const int stride=S.stride, pad=S.pad;
 	int32_t*Hb=S.Hb.data(),*Eb=S.Eb.data(),*Fb=S.Fb.data();
+#if defined(__APPLE__)
+	// Apple-silicon fast path: carry the H/E/F ring slots as running loop state (advanced
+	// in the for-increment below) instead of recomputing them per diagonal via the #else
+	// path's double-modulo lambdas. Byte-identical -- it yields the same physical slot for
+	// each (s,ring) as ((d%3+3)%3)/((d%2+2)%2); hc/hd2 walk the size-3 H ring, efc/efp the
+	// size-2 E/F rings, initialized to the s=0 slots. Measured ~+1.5-2.7% on the isolated
+	// kernel with Apple clang across two Apple-silicon machines, and a wash with a modern
+	// Linux clang (which already optimizes the modulo form), so the win is gated here. The
+	// gate is really macOS-on-aarch64: __APPLE__ inside this __aarch64__-only kernel means
+	// Apple silicon (do NOT use APPLE_SILICON -- simd_compat.h defines it 1 for every
+	// aarch64 build, so it is true on Graviton too). It stands in for Apple's system clang,
+	// the toolchain macOS ships; a non-Apple clang on macOS still takes this path but gets
+	// the same harmless wash (still byte-identical), not a regression.
+	// KEEP IN SYNC with the #else lambdas below: both encode the SAME ring sizes (H=3,
+	// E/F=2); a ring-size change must update both forms or the two builds silently diverge.
+	int hc=0,hd2=1,efc=0,efp=1;
+#else
+	// Portable form (every non-Apple build): recompute the ring slot per access via modulo.
+	// KEEP IN SYNC with the Apple incremental form above (same H=3, E/F=2 ring sizes).
 	auto Hs=[&](int d){return &Hb[(long)(((d%3)+3)%3)*stride];};
 	auto Es=[&](int d){return &Eb[(long)(((d%2)+2)%2)*stride];};
 	auto Fs=[&](int d){return &Fb[(long)(((d%2)+2)%2)*stride];};
+#endif
 	uint8_t*tpad=S.tpad.data(),*qpad=S.qpad.data();
 	for(int i=0;i<tlen;++i)tpad[pad+i]=target[i];
 	for(int j=0;j<qlen;++j)qpad[pad+j]=query[j];
@@ -756,8 +776,13 @@ static int ksw_g2_wave(int qlen,const uint8_t*query,int tlen,const uint8_t*targe
 	int32_t score; if(qlen==0)score=0; else if(qlen<=w)score=-(o_ins+e_ins*qlen); else score=MINUS_INF;
 	const int32x4_t VMINF=vdupq_n_s32(MINUS_INF); const int32x4_t LANEID={0,1,2,3};
 	const int Sdim=(tlen-1)+(qlen-1)+1;
+#if defined(__APPLE__)
+	for(int s=0;s<Sdim;++s, hc=(hc==2?0:hc+1), hd2=(hd2==2?0:hd2+1), efc^=1, efp^=1){
+		int32_t*Hc=&Hb[(long)hc*stride],*Ec=&Eb[(long)efc*stride],*Fc=&Fb[(long)efc*stride]; int32_t*Hd2=&Hb[(long)hd2*stride],*Ep1=&Eb[(long)efp*stride],*Fp1=&Fb[(long)efp*stride];
+#else
 	for(int s=0;s<Sdim;++s){
 		int32_t*Hc=Hs(s),*Ec=Es(s),*Fc=Fs(s); int32_t*Hd2=Hs(s-2),*Ep1=Es(s-1),*Fp1=Fs(s-1);
+#endif
 		int i_lo=s-(qlen-1); { int a=(s-w+1)>>1; if(a>i_lo)i_lo=a; } if(i_lo<0)i_lo=0;
 		int i_hi=s; { int a=(s+w)>>1; if(a<i_hi)i_hi=a; } if(i_hi>tlen-1)i_hi=tlen-1;
 		int zbase_s=(int)roff;                 // diagonal-major offset for this diagonal
@@ -851,9 +876,18 @@ static int ksw_g2_wave16(int qlen,const uint8_t*query,int tlen,const uint8_t*tar
 	int*zoff=S.zoff.data(),*ziS=S.ziS.data(); long roff=0;
 	const int stride=S.stride, pad=S.pad;
 	int16_t*Hb=S.Hb16.data(),*Eb=S.Eb16.data(),*Fb=S.Fb16.data();
+#if defined(__APPLE__)
+	// Apple-silicon fast path: incremental ring-slot tracking (full rationale, gating, and
+	// the macOS-on-aarch64 / non-Apple-clang notes are in the int32 NEON kernel above).
+	// Byte-identical; measured ~+1.5-2.7% on Apple clang, a wash on a modern Linux clang.
+	// KEEP IN SYNC with the #else lambdas below (same H=3, E/F=2 ring sizes).
+	int hc=0,hd2=1,efc=0,efp=1;
+#else
+	// Portable form; KEEP IN SYNC with the Apple incremental form above (same H=3, E/F=2).
 	auto Hs=[&](int d){return &Hb[(long)(((d%3)+3)%3)*stride];};
 	auto Es=[&](int d){return &Eb[(long)(((d%2)+2)%2)*stride];};
 	auto Fs=[&](int d){return &Fb[(long)(((d%2)+2)%2)*stride];};
+#endif
 	uint8_t*tpad=S.tpad.data(),*qpad=S.qpad.data();
 	for(int i=0;i<tlen;++i)tpad[pad+i]=target[i];
 	for(int j=0;j<qlen;++j)qpad[pad+j]=query[j];
@@ -862,8 +896,13 @@ static int ksw_g2_wave16(int qlen,const uint8_t*query,int tlen,const uint8_t*tar
 	int score; if(qlen==0)score=0; else if(qlen<=w)score=-(o_ins+e_ins*qlen); else score=MINUS_INF;
 	const int16x8_t VMINF=vdupq_n_s16(KSW_VMINF16); const int16x8_t LANEID={0,1,2,3,4,5,6,7};
 	const int Sdim=(tlen-1)+(qlen-1)+1;
+#if defined(__APPLE__)
+	for(int s=0;s<Sdim;++s, hc=(hc==2?0:hc+1), hd2=(hd2==2?0:hd2+1), efc^=1, efp^=1){
+		int16_t*Hc=&Hb[(long)hc*stride],*Ec=&Eb[(long)efc*stride],*Fc=&Fb[(long)efc*stride]; int16_t*Hd2=&Hb[(long)hd2*stride],*Ep1=&Eb[(long)efp*stride],*Fp1=&Fb[(long)efp*stride];
+#else
 	for(int s=0;s<Sdim;++s){
 		int16_t*Hc=Hs(s),*Ec=Es(s),*Fc=Fs(s); int16_t*Hd2=Hs(s-2),*Ep1=Es(s-1),*Fp1=Fs(s-1);
+#endif
 		int i_lo=s-(qlen-1); { int a=(s-w+1)>>1; if(a>i_lo)i_lo=a; } if(i_lo<0)i_lo=0;
 		int i_hi=s; { int a=(s+w)>>1; if(a<i_hi)i_hi=a; } if(i_hi>tlen-1)i_hi=tlen-1;
 		int zbase_s=(int)roff;
