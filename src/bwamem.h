@@ -286,11 +286,10 @@ typedef struct mem_opt_t {
      * Inert without a `.alt` sidecar: a[which] != a[0] requires n_pri < a.n (the
      * read has ALT hits), and is_alt is never set without one.
      *
-     * Deliberately NOT a compat_target_t field. Making the default match both
-     * upstreams means no target needs a say in it, which keeps that table's
-     * "output shaping only, never an alignment change" invariant intact -- FLAG
-     * is an alignment-record field. --compat and this option are instead
-     * mutually exclusive (see main_mem). */
+     * Deliberately NOT a compat_target_t field: that table records where the
+     * two upstreams DIFFER, and both derive FLAG 0x2 from a[0], so the default
+     * matches both and no target needs a say in it. --compat and this option
+     * are instead mutually exclusive (see main_mem). */
     int    proper_pair_from_emitted;
     int    supp_rep_hard_cap; // supp alnregs whose chain's seeds share >=this many genome hits are forced to MAPQ=0; 0 disables
     int    smem_dedup;        // 1 = dedup fully-identical SMEMs before SA expansion (--smem-dedup); 0 = off (default, byte-identical to baseline)
@@ -305,7 +304,9 @@ typedef struct mem_opt_t {
      * memset to zero and is NOT such a struct; only its scalars are ever read.)
      * Points into the static table in compat_target.cpp -- not owned, never
      * freed, so the shallow struct copy in the MEM_F_SMARTPE path is correct.
-     * Shapes OUTPUT ONLY: no alignment, score, flag, or tag VALUE depends on it. */
+     * Reproduces the target's output: tag and header shaping, plus the target's
+     * own alignment on the two records where bwa and bwa-mem2 disagree (see
+     * compat_target.h). */
     const compat_target_t *compat;
 } mem_opt_t;
 

@@ -16,6 +16,7 @@
 #include <cstdlib>
 
 #include "bwamem.h"
+#include "compat_target.h"
 #include "utils.h"  // hash_64
 
 // mem_chain_flt is a non-static (external) symbol in bwamem.cpp but is not
@@ -67,26 +68,27 @@ TEST_CASE("mem_chain_flt: single-chain fast path keeps the sole chain") {
     free(opt);
 }
 
-// bwa-mem2 parity for the degenerate "weight filter dropped everything" case.
-// The array is never compacted, so slot 0 still holds chain 0, and the legacy
-// seqid-range scan built the range {0,1} over that uncompacted slot -- returning
-// 1 with the chain marked kept = 3 rather than reporting zero survivors. That is
-// bwa-mem2's observable behaviour and this pins it.
+// The degenerate "weight filter dropped everything" case is one of the two
+// records where bwa-mem2's port is not faithful to bwa (#310). The array is
+// never compacted, so slot 0 still holds chain 0, and bwa-mem2's seqid-range
+// scan built the range {0,1} over that uncompacted slot -- returning 1 with the
+// chain marked kept = 3 rather than reporting zero survivors. bwa returns 0 and
+// the read goes out unmapped.
 //
-// bwa-mem2 free()s slot 0's seeds in the filter and then returns the chain
-// pointing at the freed block, so its extension reads whatever the allocator
-// left behind. bwa-mem3 defers that one free, giving the same chain with its own
-// seeds intact. Reachable via -W, -x ont2d and -x pacbio/pbref, the only modes
-// that set a nonzero min_chain_weight. Build with ASAN=1 to catch a regression
-// here as a use-after-free rather than a silent data change.
-TEST_CASE("mem_chain_flt: dropping every chain resurrects slot 0 with live seeds") {
-    mem_opt_t *opt = mem_opt_init();
-    opt->min_chain_weight = 1000;  // far above the weight of the chains below
+// The default path and --compat=bwa-mem take bwa's answer; --compat=bwa-mem2
+// reproduces the port as shipped. bwa-mem2 free()s slot 0's seeds in the filter
+// and then returns the chain pointing at the freed block, so its extension
+// reads whatever the allocator left behind; under that target bwa-mem3 defers
+// the one free, giving the same chain with its own seeds intact. Reachable via
+// -W, -x ont2d and -x pacbio/pbref, the only modes that set a nonzero
+// min_chain_weight. Build with ASAN=1 to catch a regression in the deferral as
+// a use-after-free rather than a silent data change.
 
-    // m > SEEDS_PER_CHAIN puts the seeds on the heap rather than in the caller's
-    // seedBuf arena, so the weight filter's free(c->seeds) branch is the one taken.
+// Two chains whose weight (100) is far below min_chain_weight. m > SEEDS_PER_CHAIN
+// puts the seeds on the heap rather than in the caller's seedBuf arena, so the
+// weight filter's free(c->seeds) branch is the one taken.
+static void build_all_dropped_chains(mem_chain_t chains[2]) {
     const int m = SEEDS_PER_CHAIN + 1;
-    mem_chain_t chains[2]{};
     for (int i = 0; i < 2; ++i) {
         mem_seed_t *seeds = (mem_seed_t *)calloc(m, sizeof(mem_seed_t));
         REQUIRE(seeds != NULL);
@@ -103,6 +105,31 @@ TEST_CASE("mem_chain_flt: dropping every chain resurrects slot 0 with live seeds
         chains[i].first = 7;
         chains[i].kept = 0;
     }
+}
+
+TEST_CASE("mem_chain_flt: dropping every chain reports zero survivors by default") {
+    mem_opt_t *opt = mem_opt_init();
+    opt->min_chain_weight = 1000;  // far above the weight of the chains below
+    REQUIRE(opt->compat == &COMPAT_TARGET_OFF);
+
+    mem_chain_t chains[2]{};
+    build_all_dropped_chains(chains);
+
+    // bwa's answer: nothing survives, and the filter freed both chains' seeds,
+    // so there is nothing for the caller to release (the pointers are dangling).
+    CHECK(mem_chain_flt(opt, 2, chains, /*tid=*/0) == 0);
+    free(opt);
+}
+
+TEST_CASE("mem_chain_flt: --compat=bwa-mem2 resurrects slot 0 with live seeds") {
+    mem_opt_t *opt = mem_opt_init();
+    opt->min_chain_weight = 1000;  // far above the weight of the chains below
+    opt->compat = compat_target_from_name("bwa-mem2");
+    REQUIRE(opt->compat != NULL);
+    REQUIRE(opt->compat->chain_flt_resurrect_empty == 1);
+
+    mem_chain_t chains[2]{};
+    build_all_dropped_chains(chains);
     const mem_seed_t *slot0_seeds = chains[0].seeds;
 
     CHECK(mem_chain_flt(opt, 2, chains, /*tid=*/0) == 1);

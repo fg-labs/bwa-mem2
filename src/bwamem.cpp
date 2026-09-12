@@ -2028,12 +2028,12 @@ int mem_chain_flt(const mem_opt_t *opt, int n_chn_, mem_chain_t *a_, int tid)
          * When at least one chain survives, slot 0 was either kept or overwritten
          * by compaction, and the seeds are freed immediately after the loop.
          *
-         * Under a target that does NOT resurrect (--compat=bwa-mem), nothing
-         * reads slot 0 again, so the deferral has nothing to protect and holding
-         * the pointer past the early return below would simply leak it. Free it
-         * in the loop, exactly as bwa does. */
+         * When the target does NOT resurrect (the default and --compat=bwa-mem),
+         * nothing reads slot 0 again, so the deferral has nothing to protect and
+         * holding the pointer past the early return below would simply leak it.
+         * Free it in the loop, exactly as bwa does. */
         const int resurrect_empty =
-            (opt->compat == NULL) || opt->compat->chain_flt_resurrect_empty;
+            (opt->compat != NULL) && opt->compat->chain_flt_resurrect_empty;
         mem_seed_t *slot0_seeds = NULL;
         for (i = k = 0; i < n_chn_; ++i)
         {
@@ -2058,9 +2058,9 @@ int mem_chain_flt(const mem_opt_t *opt, int n_chn_, mem_chain_t *a_, int tid)
          * (its tail loops are bounded by n_chn == 0, so it returns 0 and the read
          * goes out unmapped); bwa-mem2's seqid-range machinery instead rebuilds a
          * count of 1 and extends the chain it just rejected. Returning here is
-         * bwa's answer -- selected per target rather than unconditionally,
-         * because a `bwa-mem2` or `off` run that stopped resurrecting would no
-         * longer be the drop-in it advertises. */
+         * bwa's answer, and the default: the filter's decision stands. Only
+         * `--compat=bwa-mem2` keeps resurrecting, because reproducing that
+         * release's records, this port divergence included, is its contract. */
         if (n_chn_ == 0 && !resurrect_empty) return 0;
     }
 

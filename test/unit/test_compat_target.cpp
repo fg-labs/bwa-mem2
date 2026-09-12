@@ -34,9 +34,10 @@ TEST_CASE("compat target `off` is bwa-mem3's native output") {
     CHECK(t->read_sidecar == 1);
     CHECK(t->emit_mq      == 1);
     CHECK(t->emit_hn      == 1);
-    // #310: `off` keeps bwa-mem2's all-chains-dropped behavior, because the
-    // default path is the drop-in and must not move an alignment.
-    CHECK(t->chain_flt_resurrect_empty == 1);
+    // #310: `off` reports zero survivors when the weight filter drops every
+    // chain (bwa's answer); only the bwa-mem2 target resurrects the rejected
+    // chain, because reproducing that release is its contract.
+    CHECK(t->chain_flt_resurrect_empty == 0);
     // #469: `off` reports the correct sentinel-row coordinate; only the
     // bwa-mem2 target keeps bwa-mem2's dropped walk offset.
     CHECK(t->sa_sentinel_drop_offset == 0);

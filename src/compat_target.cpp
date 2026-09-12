@@ -25,7 +25,7 @@ const compat_target_t COMPAT_TARGET_OFF = {
     /* .read_sidecar       */ 1,
     /* .emit_mq            */ 1,
     /* .emit_hn            */ 1,
-    /* .chain_flt_resurrect_empty */ 1,   /* bwa-mem2 behavior: the drop-in default */
+    /* .chain_flt_resurrect_empty */ 0,   /* zero survivors, as bwa: the filter's decision stands */
     /* .sa_sentinel_drop_offset */ 0,     /* correct coordinate (matches bwa) */
 };
 
