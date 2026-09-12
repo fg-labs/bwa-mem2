@@ -484,7 +484,7 @@ STANDALONE_TESTS = kswv_nrow_zero_test kswv_freed_cell_test \
                    packed_text_overflow_nbases_test \
                    mem_gen_alt_zero_calloc_test srtgg_grow_multi_test \
                    kopen_pipe_status_test cli_arg_safety_test \
-                   pwrite_all_status_test
+                   pwrite_all_status_test x86_soa_pack_test
 STANDALONE_TEST_OBJS = $(STANDALONE_TESTS:%=test/%.o)
 
 # shm_pack_round_trip_test is excluded from `test:` because it runs via
@@ -1158,6 +1158,15 @@ test/kswv_nrow_zero_test.o: test/kswv_nrow_zero_test.cpp
 # (matching test/unit/*; -Iext/doctest would shadow the C++ <version> header).
 # kswv_nrow_zero_test does not use doctest, hence its rule above omits this.
 test/kswv_freed_cell_test.o: test/kswv_freed_cell_test.cpp
+	$(CXX) -c $(BASE_CXXFLAGS) -march=native $(CPPFLAGS) $(INCLUDES) -Iext $(DEPFLAGS) $< -o $@
+
+# x86_soa_pack.h byte-identity vs the scalar SoA fill: header-only, so it links
+# nothing from libbwa.a. -march=native so W == 64 is instantiated exactly when
+# the host has AVX-512BW; on a host without AVX2 the header is empty and the
+# binary records the skip. Carries -Iext for doctest like kswv_freed_cell_test.
+x86_soa_pack_test: test/x86_soa_pack_test.o
+	$(CXX) $(BASE_CXXFLAGS) -march=native $(LDFLAGS) test/x86_soa_pack_test.o -o $@
+test/x86_soa_pack_test.o: test/x86_soa_pack_test.cpp
 	$(CXX) -c $(BASE_CXXFLAGS) -march=native $(CPPFLAGS) $(INCLUDES) -Iext $(DEPFLAGS) $< -o $@
 
 test/bandedswa_padding_test.o: test/bandedswa_padding_test.cpp
