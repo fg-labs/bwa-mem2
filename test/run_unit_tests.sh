@@ -271,6 +271,25 @@ else
     fail "sa_resolve_parity_test (BWA3_SA_LANES=64): non-zero exit"
 fi
 
+# And at the two compiled-in defaults, 20 (arm64) and 40 (x86_64), so each
+# host's parity run exercises the other architecture's default too: the
+# no-env run above pins only whichever default this build compiled in.
+for lanes in 20 40; do
+    if OUT="$(cd "$HERE" && BWA3_SA_LANES=$lanes ./sa_resolve_parity_test "$FIXTURES/phix.fa" 2>&1)"; then
+        if echo "$OUT" | grep -q "SA resolve PARITY PASS"; then
+            ok "sa_resolve_parity_test (BWA3_SA_LANES=$lanes)"
+        elif echo "$OUT" | grep -q "SA resolve PARITY SKIP"; then
+            skip "sa_resolve_parity_test (BWA3_SA_LANES=$lanes, non-AArch64)"
+        else
+            echo "$OUT"
+            fail "sa_resolve_parity_test (BWA3_SA_LANES=$lanes): no PASS or SKIP line"
+        fi
+    else
+        echo "$OUT"
+        fail "sa_resolve_parity_test (BWA3_SA_LANES=$lanes): non-zero exit"
+    fi
+done
+
 # --- long-read end-to-end (issue 44) --------------------------------------
 # Pre-fix, reads > 151 bp overran the per-thread SMEM buffer (segfault) and
 # reads > 512 bp tripped the MAX_READ_LEN_FOR_LOCKSTEP assert. Post-fix the
