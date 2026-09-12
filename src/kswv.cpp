@@ -313,13 +313,13 @@ kswv::kswv(const int o_del, const int e_del, const int o_ins,
      * block per row covers the partial tail. */
     colIdx16 = (int16_t *)_mm_malloc((size_t) this->maxQerLen * SIMD_WIDTH16
                                      * sizeof(int16_t), 64);
-    xassert(colIdx16 != NULL, "kswv: colIdx16 allocation failed");
+    xassert(colIdx16 != NULL, "out of memory: colIdx16");
     for (int32_t j = 0; j < this->maxQerLen; ++j)
         for (int k = 0; k < SIMD_WIDTH16; ++k)
             colIdx16[(size_t) j * SIMD_WIDTH16 + k] = (int16_t) j;
     qeBlk16Stride = ((this->maxQerLen + QE_BLK - 1) / QE_BLK + 1) * SIMD_WIDTH16;
     qeBlk16 = (int16_t *)_mm_malloc((size_t) 2 * qeBlk16Stride * sizeof(int16_t), 64);
-    xassert(qeBlk16 != NULL, "kswv: qeBlk16 allocation failed");
+    xassert(qeBlk16 != NULL, "out of memory: qeBlk16");
 }
 
 // Mat-aware constructor (issue 173). Delegates to the 9-arg ctor (identical
@@ -491,8 +491,8 @@ void kswv::kswvBatchWrapper8(SeqPair *pairArray,
     uint8_t *seq2SoA = NULL;
     seq2SoA = (uint8_t *)_mm_malloc(this->maxQerLen * SIMD_WIDTH8 * numThreads * sizeof(uint8_t), 128);
 
-    assert(seq1SoA != NULL);
-    assert(seq2SoA != NULL);
+    xassert(seq1SoA != NULL, "out of memory: seq1SoA");
+    xassert(seq2SoA != NULL, "out of memory: seq2SoA");
 
     int32_t ii;
     int32_t roundNumPairs = ((numPairs + SIMD_WIDTH8 - 1) / SIMD_WIDTH8) * SIMD_WIDTH8;
@@ -544,9 +544,12 @@ void kswv::kswvBatchWrapper8(SeqPair *pairArray,
                 seq1p[j] = seqBufRef + sp.idr;
                 seq2p[j] = seqBufQer + sp.idq;
 #endif
+                xassert(sp.len1 < this->maxRefLen, "kswv: reference length exceeds SoA capacity");
+                xassert(sp.len2 < this->maxQerLen, "kswv: query length exceeds SoA capacity");
                 len1a[j] = sp.len1;
                 len2a[j] = sp.len2;
                 quant[j] = query_quantum8(sp.len2);
+                xassert(quant[j] < this->maxQerLen, "kswv: padded query quantum exceeds SoA capacity");
                 if (maxLen1 < sp.len1) maxLen1 = sp.len1;
                 if (maxLen2 < quant[j]) maxLen2 = quant[j];
             }
@@ -1545,8 +1548,8 @@ void kswv::kswvBatchWrapper16(SeqPair *pairArray,
     int16_t *seq2SoA = NULL;
     seq2SoA = (int16_t *)_mm_malloc(this->maxQerLen * SIMD_WIDTH16 * numThreads * sizeof(int16_t), 128);
 
-    assert(seq1SoA != NULL);
-    assert(seq2SoA != NULL);
+    xassert(seq1SoA != NULL, "out of memory: seq1SoA");
+    xassert(seq2SoA != NULL, "out of memory: seq2SoA");
 
     int32_t ii;
     int32_t roundNumPairs = ((numPairs + SIMD_WIDTH16 - 1) / SIMD_WIDTH16) * SIMD_WIDTH16;
@@ -1596,9 +1599,12 @@ void kswv::kswvBatchWrapper16(SeqPair *pairArray,
                 seq1p[j] = seqBufRef + sp.idr;
                 seq2p[j] = seqBufQer + sp.idq;
 #endif
+                xassert(sp.len1 < this->maxRefLen, "kswv: reference length exceeds SoA capacity");
+                xassert(sp.len2 < this->maxQerLen, "kswv: query length exceeds SoA capacity");
                 len1a[j] = sp.len1;
                 len2a[j] = sp.len2;
                 quant[j] = query_quantum16(sp.len2);
+                xassert(quant[j] < this->maxQerLen, "kswv: padded query quantum exceeds SoA capacity");
                 if (maxLen1 < sp.len1) maxLen1 = sp.len1;
                 if (maxLen2 < quant[j]) maxLen2 = quant[j];
             }
@@ -2814,7 +2820,8 @@ void kswv::kswvBatchWrapper8_avx2(SeqPair *pairArray,
         (size_t)this->maxRefLen * SIMD_WIDTH8 * numThreads * sizeof(uint8_t), 128);
     uint8_t *seq2SoA = (uint8_t*)_mm_malloc(
         (size_t)this->maxQerLen * SIMD_WIDTH8 * numThreads * sizeof(uint8_t), 128);
-    assert(seq1SoA && seq2SoA);
+    xassert(seq1SoA != NULL, "out of memory: seq1SoA");
+    xassert(seq2SoA != NULL, "out of memory: seq2SoA");
 
     int32_t roundNumPairs = ((numPairs + SIMD_WIDTH8 - 1) / SIMD_WIDTH8) * SIMD_WIDTH8;
     for (int32_t ii = numPairs; ii < roundNumPairs; ii++) {
@@ -2852,9 +2859,12 @@ void kswv::kswvBatchWrapper8_avx2(SeqPair *pairArray,
             const SeqPair &sp = pairArray[i + j];
             seq1p[j] = seqBufRef + sp.idr;
             seq2p[j] = seqBufQer + sp.idq;
+            xassert(sp.len1 < this->maxRefLen, "kswv: reference length exceeds SoA capacity");
+            xassert(sp.len2 < this->maxQerLen, "kswv: query length exceeds SoA capacity");
             len1a[j] = sp.len1;
             len2a[j] = sp.len2;
             quant[j] = query_quantum8(sp.len2);
+            xassert(quant[j] < this->maxQerLen, "kswv: padded query quantum exceeds SoA capacity");
             if (maxLen1 < sp.len1) maxLen1 = sp.len1;
             if (maxLen2 < quant[j]) maxLen2 = quant[j];
         }
@@ -3253,8 +3263,8 @@ void kswv::kswvBatchWrapper16_avx2(SeqPair *pairArray,
         (size_t)this->maxRefLen * SIMD_WIDTH16 * numThreads * sizeof(int16_t), 128);
     int16_t *seq2SoA = (int16_t *)_mm_malloc(
         (size_t)this->maxQerLen * SIMD_WIDTH16 * numThreads * sizeof(int16_t), 128);
-    assert(seq1SoA != NULL);
-    assert(seq2SoA != NULL);
+    xassert(seq1SoA != NULL, "out of memory: seq1SoA");
+    xassert(seq2SoA != NULL, "out of memory: seq2SoA");
 
     int32_t roundNumPairs = ((numPairs + SIMD_WIDTH16 - 1) / SIMD_WIDTH16) * SIMD_WIDTH16;
     for (int32_t ii = numPairs; ii < roundNumPairs; ii++) {
@@ -3290,6 +3300,10 @@ void kswv::kswvBatchWrapper16_avx2(SeqPair *pairArray,
             const SeqPair &sp = pairArray[i + j];
             seq1p[j] = seqBufRef + sp.idr;
             seq2p[j] = seqBufQer + sp.idq;
+            xassert(sp.len1 < this->maxRefLen,
+                    "kswv: reference length exceeds SoA capacity");
+            xassert(sp.len2 < this->maxQerLen,
+                    "kswv: query length exceeds SoA capacity");
             len1a[j] = sp.len1;
             len2a[j] = sp.len2;
             quant[j] = query_quantum16(sp.len2);
@@ -3356,8 +3370,8 @@ void kswv::kswvBatchWrapper8(SeqPair *pairArray,
     uint8_t *seq2SoA = NULL;
     seq2SoA = (uint8_t *)_mm_malloc(this->maxQerLen * SIMD_WIDTH8 * numThreads * sizeof(uint8_t), 64);
     
-    assert(seq1SoA != NULL);
-    assert(seq2SoA != NULL);
+    xassert(seq1SoA != NULL, "out of memory: seq1SoA");
+    xassert(seq2SoA != NULL, "out of memory: seq2SoA");
 
     int32_t ii;
     int32_t roundNumPairs = ((numPairs + SIMD_WIDTH8 - 1) / SIMD_WIDTH8 ) * SIMD_WIDTH8;
@@ -3448,9 +3462,12 @@ void kswv::kswvBatchWrapper8(SeqPair *pairArray,
                 seq1p[j] = seqBufRef + sp.idr;
                 seq2p[j] = seqBufQer + sp.idq;
 #endif
+                xassert(sp.len1 < this->maxRefLen, "kswv: reference length exceeds SoA capacity");
+                xassert(sp.len2 < this->maxQerLen, "kswv: query length exceeds SoA capacity");
                 len1a[j] = sp.len1;
                 len2a[j] = sp.len2;
                 quant[j] = query_quantum8(sp.len2);
+                xassert(quant[j] < this->maxQerLen, "kswv: padded query quantum exceeds SoA capacity");
                 if(maxLen1 < sp.len1) maxLen1 = sp.len1;
                 if(maxLen2 < quant[j]) maxLen2 = quant[j];
             }
@@ -4015,8 +4032,8 @@ void kswv::kswvBatchWrapper16(SeqPair *pairArray,
     int16_t *seq2SoA = NULL;
     seq2SoA = (int16_t *)_mm_malloc(this->maxQerLen * SIMD_WIDTH16 * numThreads * sizeof(int16_t), 64);
 
-    assert(seq1SoA != NULL);
-    assert(seq2SoA != NULL);    
+    xassert(seq1SoA != NULL, "out of memory: seq1SoA");
+    xassert(seq2SoA != NULL, "out of memory: seq2SoA");
     
     int32_t ii;
     int32_t roundNumPairs = ((numPairs + SIMD_WIDTH16 - 1) / SIMD_WIDTH16 ) * SIMD_WIDTH16;
@@ -4117,8 +4134,10 @@ void kswv::kswvBatchWrapper16(SeqPair *pairArray,
                 seq1p[j] = seqBufRef + sp.idr;
                 seq2p[j] = seqBufQer + sp.idq;
 #endif
-                assert(sp.len1 < this->maxRefLen);
-                assert(sp.len2 < this->maxQerLen);
+                xassert(sp.len1 < this->maxRefLen,
+                        "kswv: reference length exceeds SoA capacity");
+                xassert(sp.len2 < this->maxQerLen,
+                        "kswv: query length exceeds SoA capacity");
                 len1a[j] = sp.len1;
                 len2a[j] = sp.len2;
                 quant[j] = query_quantum16(sp.len2);

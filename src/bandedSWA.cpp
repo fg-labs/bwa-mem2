@@ -320,9 +320,9 @@ int BandedPairWiseSW::scalarBandedSWA(int qlen, const uint8_t *query,
     
     // allocate memory
     qp = (int8_t *) malloc(qlen * m);
-    assert(qp != NULL);
+    xassert(qp != NULL, "out of memory: qp");
     eh = (eh_t *) calloc(qlen + 1, 8);
-    assert(eh != NULL);
+    xassert(eh != NULL, "out of memory: eh");
 
     // generate the query profile
     for (k = i = 0; k < m; ++k) {
