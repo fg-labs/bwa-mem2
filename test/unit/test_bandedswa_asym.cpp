@@ -13,10 +13,12 @@
 
 #include <cstdint>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "doctest/doctest.h"
 #include "bandedSWA.h"
+#include "simd_dispatch.h"
 
 #if HAVE_BSW_VECTOR_8_16
 
@@ -104,6 +106,22 @@ int score_mismatches(int width, const int8_t mat[25], int a, int b,
 }
 
 } // namespace
+
+// These parity cases deliberately run getScores8/16 on whatever tier the host
+// (or BWAMEM3_FORCE_TIER) selects, NOT only ARM NEON: exercising every tier is
+// what lets this suite catch a tier-specific kernel divergence -- e.g. a 256-bit
+// AVX2 gap-open sign bug that leaked a negative F into the band's zero-scan and
+// perturbed gtle, invisible to a NEON-only gate. The NEON path itself is covered
+// by the arm64 CI matrix rows. This sentinel makes the active tier visible in the
+// test log and asserts a real vector kernel (not the scalar fallback) is running,
+// so a misconfigured runner that quietly dropped to scalar fails loudly here.
+TEST_CASE("bandedSWA parity gate exposes and asserts the active SIMD tier"
+          * doctest::test_suite("unit/bandedswa-asym")) {
+    bwamem3_simd_init();
+    const int tier = bwamem3_simd_tier();
+    MESSAGE("bandedSWA parity gate active SIMD tier: " << std::string(bwamem3_simd_tier_name(tier)));
+    CHECK(tier != BWAMEM3_TIER_NONE);
+}
 
 TEST_CASE("bandedSWA symmetric control: getScores8 == scalar (sanity)"
           * doctest::test_suite("unit/bandedswa-asym")) {

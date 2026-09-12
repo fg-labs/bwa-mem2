@@ -608,11 +608,17 @@ void BandedPairWiseSW::scalarBandedSWAWrapper(SeqPair *seqPairArray,
         __m256i m11 = _mm256_add_epi16(h00, sbt11);                     \
         __m256i cmp11 = _mm256_cmpeq_epi16(h00, zero256);               \
         m11 = _mm256_andnot_si256(cmp11, m11);                 \
+        /* m11 = h00 + sbt11 can be NEGATIVE (a positive h00 plus a mismatch/N \
+         * penalty). Floor it at 0 up front: it does not change h11 (max with \
+         * the non-negative e11/f11) and it lets the subs_epu16 gap-opens below \
+         * stay valid. Without it, subs_epu16 reads a negative m11 as a huge \
+         * unsigned and the result stays negative, leaking a sub-zero E/F into \
+         * the band's zero-scan (a stray -1 shifts head/tail and corrupts gtle). \
+         * max(m11,0) then subs_epu16 == the scalar oracle's signed sub + floor, \
+         * for one op instead of a full signed-sub + max per gap-open. */ \
+        m11 = _mm256_max_epi16(m11, zero256);                          \
         h11 = _mm256_max_epi16(m11, e11);                               \
         h11 = _mm256_max_epi16(h11, f11);                               \
-        /* max(x - open, 0) == subs_epu16(x, open): scores are non-negative and \
-         * < 32768, so unsigned-saturating sub matches the signed sub + zero  \
-         * floor (brings the u16 core to parity with the u8 core's subs_epu8). */ \
         __m256i val256 = _mm256_subs_epu16(m11, oe_ins256);            \
         e11 = _mm256_sub_epi16(e11, e_ins256);                          \
         e11 = _mm256_max_epi16(val256, e11);                            \
@@ -2573,11 +2579,17 @@ void BandedPairWiseSW::smithWaterman256_16(uint16_t seq1SoA[],
         __m512i m11 = _mm512_add_epi16(h00, sbt11);                     \
         __mmask32 cmp11 = _mm512_cmpeq_epi16_mask(h00, zero512);        \
         m11 = _mm512_mask_blend_epi16(cmp11, m11, zero512);             \
+        /* m11 = h00 + sbt11 can be NEGATIVE (a positive h00 plus a mismatch/N \
+         * penalty). Floor it at 0 up front: it does not change h11 (max with \
+         * the non-negative e11/f11) and it lets the subs_epu16 gap-opens below \
+         * stay valid. Without it, subs_epu16 reads a negative m11 as a huge \
+         * unsigned and the result stays negative, leaking a sub-zero E/F into \
+         * the band's zero-scan (a stray -1 shifts head/tail and corrupts gtle). \
+         * max(m11,0) then subs_epu16 == the scalar oracle's signed sub + floor, \
+         * for one op instead of a full signed-sub + max per gap-open. */ \
+        m11 = _mm512_max_epi16(m11, zero512);                          \
         h11 = _mm512_max_epi16(m11, e11);                               \
         h11 = _mm512_max_epi16(h11, f11);                               \
-        /* max(x - open, 0) == subs_epu16(x, open): scores are non-negative and \
-         * < 32768, so unsigned-saturating sub matches the signed sub + zero  \
-         * floor (brings the u16 core to parity with the u8 core's subs_epu8). */ \
         __m512i val512 = _mm512_subs_epu16(m11, oe_ins512);            \
         e11 = _mm512_sub_epi16(e11, e_ins512);                          \
         e11 = _mm512_max_epi16(val512, e11);                            \
