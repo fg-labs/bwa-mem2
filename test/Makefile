@@ -232,47 +232,53 @@ libsais-objs:
 
 $(EXE) $(UNIT_BIN) $(INTEGRATION_BIN): | libsais-objs
 
+# Every standalone binary below also lists ../libbwa.a as a prerequisite so a
+# library rebuild relinks it. Without that, `make <test>` after a src/ change
+# said "up to date" and ran the OLD library -- a parity test can then pass or
+# fail against code that is no longer in the tree. The archive is a
+# prerequisite only (it is linked through $(LIBS) as -lbwa), hence the
+# $(filter %.o,$^) on the link line.
 # NB: $(LDFLAGS) is threaded through every link rule below so COVERAGE=1
 # (which appends --coverage to LDFLAGS at the top of the file) propagates
 # uniformly. Without it, `make -C test all COVERAGE=1` would leave the
 # legacy binaries with unresolved __gcov_* symbols even though the .o
 # files were compiled with --coverage. CI doesn't rebuild these targets
 # under coverage, but local-dev `make all` did.
-fmi_test: $(INTEGRATION_DIR)/fmi_test.o
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+fmi_test: $(INTEGRATION_DIR)/fmi_test.o ../libbwa.a
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
-smem2_test: $(INTEGRATION_DIR)/smem2_test.o
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+smem2_test: $(INTEGRATION_DIR)/smem2_test.o ../libbwa.a
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
-sa2ref_test: $(INTEGRATION_DIR)/sa2ref_test.o
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+sa2ref_test: $(INTEGRATION_DIR)/sa2ref_test.o ../libbwa.a
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
-bwt_seed_strategy_test: $(INTEGRATION_DIR)/bwt_seed_strategy_test.o
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+bwt_seed_strategy_test: $(INTEGRATION_DIR)/bwt_seed_strategy_test.o ../libbwa.a
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
-xeonbsw: $(INTEGRATION_DIR)/main_banded.o
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+xeonbsw: $(INTEGRATION_DIR)/main_banded.o ../libbwa.a
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
-bandedswa_zdrop_eweight_test: $(INTEGRATION_DIR)/bandedswa_zdrop_eweight_test.o
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+bandedswa_zdrop_eweight_test: $(INTEGRATION_DIR)/bandedswa_zdrop_eweight_test.o ../libbwa.a
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
-smem_lockstep_parity_test: smem_lockstep_parity_test.o
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+smem_lockstep_parity_test: smem_lockstep_parity_test.o ../libbwa.a
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
-bwtseed_lockstep_parity_test: bwtseed_lockstep_parity_test.o
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+bwtseed_lockstep_parity_test: bwtseed_lockstep_parity_test.o ../libbwa.a
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
-backwardext_konly_parity_test: backwardext_konly_parity_test.o
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+backwardext_konly_parity_test: backwardext_konly_parity_test.o ../libbwa.a
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
-sa_lookup_sentinel_parity_test: sa_lookup_sentinel_parity_test.o
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+sa_lookup_sentinel_parity_test: sa_lookup_sentinel_parity_test.o ../libbwa.a
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
 backwardext_parity_test: backwardext_parity_test.o ../libbwa.a
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
-header_insert_test: header_insert_test.o
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+header_insert_test: header_insert_test.o ../libbwa.a
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
 # Build test-local copies of packed_text.cpp / system.cpp into test/
 # rather than ../src/. The parent build's CXXFLAGS (`-O3 -fpermissive`,
@@ -281,15 +287,18 @@ header_insert_test: header_insert_test.o
 # and writing back into ../src/*.o would silently overwrite parent build
 # artifacts with a different ABI/flag set — `ar rcs libbwa.a ...` would
 # then archive the test-flagged objects on the next parent rebuild.
-packed_text_test: packed_text_test.o packed_text_lib.o
-	$(CXX) -o $@ $^ $(LIBS)
+# They still link ../libbwa.a through $(LIBS) (packed_text.cpp calls
+# err_fatal, which lives there), so they carry the same prerequisite as
+# the rules above.
+packed_text_test: packed_text_test.o packed_text_lib.o ../libbwa.a
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
 packed_text_test.o: ../src/packed_text.h
 packed_text_lib.o: ../src/packed_text.cpp ../src/packed_text.h
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $< -o $@
 
-system_test: system_test.o system_lib.o
-	$(CXX) -o $@ $^ $(LIBS)
+system_test: system_test.o system_lib.o ../libbwa.a
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
 system_test.o: ../src/system.h
 system_lib.o: ../src/system.cpp ../src/system.h
@@ -297,6 +306,12 @@ system_lib.o: ../src/system.cpp ../src/system.h
 
 $(INTEGRATION_DIR)/%.o: $(INTEGRATION_DIR)/%.cpp
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $< -o $@
+
+# `make -C test print-EXE` etc.: lets test/regression/make_test_relink.sh
+# enumerate the standalone binaries from this file rather than from a copy
+# of the list (same idiom as the parent Makefile's print-%).
+print-%:
+	@echo '$($*)'
 
 
 clean:

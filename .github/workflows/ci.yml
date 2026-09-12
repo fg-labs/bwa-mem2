@@ -883,6 +883,22 @@ jobs:
         if: matrix.canonical == true
         run: bash test/regression/make_clean_no_compiler_floor.sh
 
+      - name: test/Makefile relink-on-library-change check
+        # Post-build: dry-runs test/Makefile against the standalone binaries
+        # run_unit_tests.sh built above. Compiles and links nothing, so it
+        # takes no MAKE_ARGS.
+        if: matrix.canonical == true
+        run: bash test/regression/make_test_relink.sh
+
+      - name: Makefile htscodecs-fragment guard check
+        # Post-build: needs the configured htslib checkout. Overwrites the
+        # bundled fragment the way a stray `make -B` does, asserts the guard
+        # fires with its restore hint, and puts the fragment back.
+        if: matrix.canonical == true
+        run: |
+          MAKE_ARGS="CXX=${{ matrix.cxx || 'clang++-19' }} USE_MIMALLOC=${{ matrix.use_mimalloc }}" \
+            bash test/regression/make_htscodecs_guard.sh
+
       - name: --bam=6 roundtrip smoke (chr22)
         if: matrix.canonical == true
         run: |
