@@ -553,6 +553,18 @@ jobs:
           make kvec_alloc_fail_test
           ./kvec_alloc_fail_test
 
+      - name: klib headers abort on allocation failure
+        # Same shape as the kvec check, for the other vendored klib headers
+        # (kbtree.h, kseq.h, ksort.h): each carries a self-contained
+        # out-of-memory abort behind its node/buffer allocations, and this
+        # forked, header-only binary forces a calloc, a malloc and a realloc
+        # guard across the three headers to fail (fail-once) and asserts SIGABRT
+        # with the diagnostic rather than a NULL write.
+        # Arch-independent like the kvec check; CC comes from the job-level env.
+        run: |
+          make klib_alloc_fail_test
+          ./klib_alloc_fail_test
+
       - name: kopen pipe child status propagation
         # Standalone binary exercising the `<cmd` pipe input path in
         # src/kopen.cpp (kopen/kclose): the byte-identity fixtures are plain

@@ -62,9 +62,22 @@
 #ifndef AC_KSORT_H
 #define AC_KSORT_H
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+
+/* Allocation-failure guard for the merge buffer and the introsort stack
+ * below. Both are written through as soon as they are allocated, so a NULL
+ * return is a NULL-deref, and the guard has to hold in every build rather
+ * than only where assert() is live. Vendored header with no project
+ * includes, so the abort is self-contained (cf. kv_realloc_or_die() in
+ * kvec.h) instead of going through the project's fatal-error macro. */
+static inline void ksort_oom_abort(size_t n)
+{
+	fprintf(stderr, "[ksort] out of memory: failed to (re)allocate %zu bytes\n", n);
+	abort();
+}
 
 #ifdef USE_MALLOC_WRAPPERS
 #  include "malloc_wrap.h"
@@ -92,7 +105,7 @@ typedef struct {
 																		\
 		a2[0] = array;													\
 		a2[1] = temp? temp : (type_t*)malloc(sizeof(type_t) * n);	\
-        assert(a2[1] != NULL);                                          \
+        if (a2[1] == NULL && n != 0) ksort_oom_abort(sizeof(type_t) * n); /* malloc(0) may be NULL */ \
 		for (curr = 0, shift = 0; (1ul<<shift) < n; ++shift) {			\
 			a = a2[curr]; b = a2[1-curr];								\
 			if (shift == 0) {											\
@@ -219,7 +232,7 @@ typedef struct {
 			stack = stack_buf;											\
 		} else {														\
 			stack = (ks_isort_stack_t*)malloc(sizeof(ks_isort_stack_t) * ((sizeof(size_t)*d)+2)); \
-			assert(stack != NULL);                                      \
+			if (stack == NULL) ksort_oom_abort(sizeof(ks_isort_stack_t) * ((sizeof(size_t)*d)+2)); \
 			stack_heap_alloc = 1;										\
 		}																\
 		top = stack; s = a; t = a + (n-1); d <<= 1;						\

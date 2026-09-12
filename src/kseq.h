@@ -32,9 +32,24 @@
 #define AC_KSEQ_H
 
 #include <ctype.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
+
+/* Allocation-failure guard for the stream/record buffers below. Each of these
+ * allocations is written through immediately (the stream struct, its read
+ * buffer, the sequence/quality strings), so a NULL return is a NULL-deref
+ * rather than something the reader can report. The guard therefore has to
+ * hold in every build, not only where assert() is live. This header is
+ * vendored and includes nothing from the surrounding project, so it carries
+ * its own self-contained abort -- the same shape as kv_realloc_or_die() in
+ * kvec.h -- rather than the project's fatal-error macro. */
+static inline void kseq_oom_abort(size_t n)
+{
+	fprintf(stderr, "[kseq] out of memory: failed to (re)allocate %zu bytes\n", n);
+	abort();
+}
 
 #ifdef USE_MALLOC_WRAPPERS
 #  include "malloc_wrap.h"
@@ -59,10 +74,10 @@
 	static inline kstream_t *ks_init(type_t f)						\
 	{																\
 		kstream_t *ks = (kstream_t*)calloc(1, sizeof(kstream_t));	\
-        assert(ks != NULL);                                         \
+        if (ks == NULL) kseq_oom_abort(sizeof(kstream_t)); \
 		ks->f = f;													\
 		ks->buf = (unsigned char*)malloc(__bufsize);				\
-        assert(ks->buf != NULL);                                    \
+        if (ks->buf == NULL) kseq_oom_abort(__bufsize); \
 		return ks;													\
 	}																\
 	static inline void ks_destroy(kstream_t *ks)					\
@@ -128,7 +143,9 @@ typedef struct __kstring_t {
 			if (str->m - str->l < (size_t)(i - ks->begin + 1)) {		\
 				str->m = str->l + (i - ks->begin) + 1;					\
 				kroundup32(str->m);										\
-				str->s = (char*)realloc(str->s, str->m);				\
+				char *ks_grown = (char*)realloc(str->s, str->m);		\
+				if (ks_grown == NULL) kseq_oom_abort(str->m);			\
+				str->s = ks_grown;										\
 			}															\
 			gotany = 1;													\
 			memcpy(str->s + str->l, ks->buf + ks->begin, i - ks->begin); \
@@ -143,7 +160,7 @@ typedef struct __kstring_t {
 		if (str->s == 0) {												\
 			str->m = 1;													\
 			str->s = (char*)calloc(1, 1);								\
-            assert(str->s != NULL);                                     \
+            if (str->s == NULL) kseq_oom_abort(1); \
 		} else if (delimiter == KS_SEP_LINE && str->l > 1 && str->s[str->l-1] == '\r') --str->l; \
 		str->s[str->l] = '\0';											\
 		return str->l;													\
@@ -163,7 +180,7 @@ typedef struct __kstring_t {
 	SCOPE kseq_t *kseq_init(type_t fd)									\
 	{																	\
 		kseq_t *s = (kseq_t*)calloc(1, sizeof(kseq_t));					\
-        assert(s != NULL);                                              \
+        if (s == NULL) kseq_oom_abort(sizeof(kseq_t)); \
 		s->f = ks_init(fd);												\
 		return s;														\
 	}																	\
@@ -196,7 +213,7 @@ typedef struct __kstring_t {
 		if (seq->seq.s == 0) { /* we can do this in the loop below, but that is slower */ \
 			seq->seq.m = 256; \
 			seq->seq.s = (char*)malloc(seq->seq.m); \
-            assert(seq->seq.s != NULL);             \
+            if (seq->seq.s == NULL) kseq_oom_abort(seq->seq.m); \
 		} \
 		while ((c = ks_getc(ks)) != -1 && c != '>' && c != '+' && c != '@') { \
 			if (c == '\n') continue; /* skip empty lines */ \
@@ -208,14 +225,17 @@ typedef struct __kstring_t {
 			/*seq->seq.m = seq->seq.l + 2;*/							\
 			seq->seq.m = seq->seq.l + 16;								\
 			kroundup32(seq->seq.m); /* rounded to the next closest 2^k */ \
-			seq->seq.s = (char*)realloc(seq->seq.s, seq->seq.m); \
-            assert(seq->seq.s != NULL); \
+			char *seq_grown = (char*)realloc(seq->seq.s, seq->seq.m); \
+			if (seq_grown == NULL) kseq_oom_abort(seq->seq.m); \
+			seq->seq.s = seq_grown; \
 		} \
 		seq->seq.s[seq->seq.l] = 0;	/* null terminated string */ \
 		if (c != '+') return seq->seq.l; /* FASTA */ \
 		if (seq->qual.m < seq->seq.m) {	/* allocate memory for qual in case insufficient */ \
 			seq->qual.m = seq->seq.m; \
-			seq->qual.s = (char*)realloc(seq->qual.s, seq->qual.m); \
+			char *qual_grown = (char*)realloc(seq->qual.s, seq->qual.m); \
+			if (qual_grown == NULL) kseq_oom_abort(seq->qual.m); \
+			seq->qual.s = qual_grown; \
 		} \
 		while ((c = ks_getc(ks)) != -1 && c != '\n'); /* skip the rest of '+' line */ \
 		if (c == -1) return -2; /* error: no quality string */ \

@@ -1091,6 +1091,16 @@ bseq_read_truncated_gzip_test: src/fr_fastq.c src/fast_reader.c src/fast_reader_
 # continuation) fails the test rather than taking the process down with it.
 kvec_alloc_fail_test: test/kvec_alloc_fail_test.c src/kvec.h
 	$(CC) -O2 -Wall -Wextra -Isrc test/kvec_alloc_fail_test.c -o $@
+# klib_alloc_fail_test -- the same contract for the other vendored klib headers
+# (kbtree.h, kseq.h, ksort.h): force a calloc, a malloc and a realloc guard
+# across the three headers to fail (fail-once, so a downstream guard can't mask
+# a deleted one) and assert the header's self-contained guard aborts with an
+# out-of-memory diagnostic instead of writing through NULL. Header-only and
+# forked like the kvec test.
+# -Wno-unused-function: the KBTREE_INIT/KSEQ_INIT expansions define static
+# accessors the test never calls.
+klib_alloc_fail_test: test/klib_alloc_fail_test.c src/kbtree.h src/kseq.h src/ksort.h
+	$(CC) -O2 -Wall -Wextra -Wno-unused-function -Isrc test/klib_alloc_fail_test.c -o $@
 
 test/shm_pack_round_trip_test.o: test/shm_pack_round_trip_test.cpp
 
@@ -1108,11 +1118,12 @@ test/shm_pack_round_trip_test.o: test/shm_pack_round_trip_test.cpp
 # Note: depends on `bwa-mem3` so version_banner.sh has a binary to grep —
 # previously `test:` only built the test harness binaries, not the main
 # executable.
-test: test-binaries $(STANDALONE_TESTS_IN_TEST_TARGET) kvec_alloc_fail_test bwa-mem3
+test: test-binaries $(STANDALONE_TESTS_IN_TEST_TARGET) kvec_alloc_fail_test klib_alloc_fail_test bwa-mem3
 	./test/bwa_mem3_tests_unit
 	./test/bwa_mem3_tests_integration
 	for t in $(STANDALONE_TESTS_IN_TEST_TARGET); do echo "./$$t"; ./$$t || exit 1; done
 	./kvec_alloc_fail_test
+	./klib_alloc_fail_test
 	BWA_MEM3=./bwa-mem3 ./test/regression/version_banner.sh
 	BWA_MEM3=./bwa-mem3 ./test/regression/meth_rescue_batched_identical.sh
 	./test/regression/ndebug_gate_lint_selftest.sh
@@ -1351,7 +1362,7 @@ $(ZLIBNG_LIB):
 	cd $(ZLIBNG_BUILD) && cmake $(ZLIBNG_CMAKE_FLAGS) .. && $(MAKE)
 
 clean: pgo-clean profile-clean lto-clean
-	rm -fr src/*.o src/*.d src/version.h test/*.o test/*.d $(FLAGS_STAMP) $(BWA_LIB) $(EXE) $(STANDALONE_TESTS) kvec_alloc_fail_test bwa-mem3.arm64
+	rm -fr src/*.o src/*.d src/version.h test/*.o test/*.d $(FLAGS_STAMP) $(BWA_LIB) $(EXE) $(STANDALONE_TESTS) kvec_alloc_fail_test klib_alloc_fail_test bwa-mem3.arm64
 	rm -f $(LIBSAIS_OBJS) $(LIBSAIS_OBJS:.o=.d)
 	rm -f src/*.gcno src/*.gcda
 	$(MAKE) -C test clean
