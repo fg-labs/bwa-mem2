@@ -267,7 +267,7 @@ void kt_for(void (*func)(void*, int, int, int), void *data, int n)
 	 * pool's worker slots can be read without the lock here. */
 	if (sp_enabled()) {
 		double *busy = (double*) malloc(n_threads * sizeof(double));
-		assert(busy != NULL);
+		xassert(busy != NULL, "out of memory: busy");
 		double sum = 0, esum = 0;
 		for (int i = 0; i < n_threads; ++i) { busy[i] = g_kt_pool.w[i].cpu_busy; sum += busy[i]; esum += g_kt_pool.w[i].encode; }
 		g_ktfor.proc_cpu += sum;                        /* accumulate across kt_for calls in a step */

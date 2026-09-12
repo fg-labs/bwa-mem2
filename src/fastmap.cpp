@@ -394,10 +394,10 @@ void worker_alloc(const mem_opt_t *opt, worker_t &w, int32_t nreads, int32_t nth
         w.mmc.wsize_buf_ref[l*CACHE_LINE] = wsize * MAX_SEQ_LEN_REF;
         w.mmc.wsize_buf_qer[l*CACHE_LINE] = wsize * MAX_SEQ_LEN_QER;
 
-        assert(w.mmc.seqBufLeftRef[l*CACHE_LINE]  != NULL);
-        assert(w.mmc.seqBufLeftQer[l*CACHE_LINE]  != NULL);
-        assert(w.mmc.seqBufRightRef[l*CACHE_LINE] != NULL);
-        assert(w.mmc.seqBufRightQer[l*CACHE_LINE] != NULL);
+        xassert(w.mmc.seqBufLeftRef[l*CACHE_LINE]  != NULL, "out of memory: w.mmc.seqBufLeftRef[l*CACHE_LINE]");
+        xassert(w.mmc.seqBufLeftQer[l*CACHE_LINE]  != NULL, "out of memory: w.mmc.seqBufLeftQer[l*CACHE_LINE]");
+        xassert(w.mmc.seqBufRightRef[l*CACHE_LINE] != NULL, "out of memory: w.mmc.seqBufRightRef[l*CACHE_LINE]");
+        xassert(w.mmc.seqBufRightQer[l*CACHE_LINE] != NULL, "out of memory: w.mmc.seqBufRightQer[l*CACHE_LINE]");
     }
 
     for(int l=0; l<nthreads; l++) {
