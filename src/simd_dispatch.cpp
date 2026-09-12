@@ -477,6 +477,8 @@ extern "C" int ksw_global2_scalar_ref##suffix(int qlen, const uint8_t *query,   
     int o_ins, int e_ins, int w, int *n_cigar, uint32_t **cigar);                     \
 extern "C" unsigned long ksw_g2_wave_exec_count##suffix(void);                        \
 extern "C" unsigned long ksw_g2_wave16_exec_count##suffix(void);                      \
+extern "C" int ksw_g2_wave16_wmin##suffix(void);                                      \
+extern "C" int ksw_g2_wave_wmin##suffix(void);                                        \
 extern "C" unsigned long ksw_g2_wave_zr_capacity##suffix(void);                       \
 extern "C" int ksw_global##suffix(int qlen, const uint8_t *query, int tlen,           \
     const uint8_t *target, int m, const int8_t *mat, int gapo, int gape,              \
@@ -554,6 +556,18 @@ extern "C" unsigned long ksw_g2_wave_exec_count(void) {
 extern "C" unsigned long ksw_g2_wave16_exec_count(void) {
     bwamem3_simd_init();
     KSW_DISPATCH_CALL(ksw_g2_wave16_exec_count);
+}
+
+/* Test-only: the wavefront width crossovers the active tier was compiled with
+ * (see ksw.cpp); 0 where the tier has no such kernel. */
+extern "C" int ksw_g2_wave16_wmin(void) {
+    bwamem3_simd_init();
+    KSW_DISPATCH_CALL(ksw_g2_wave16_wmin);
+}
+
+extern "C" int ksw_g2_wave_wmin(void) {
+    bwamem3_simd_init();
+    KSW_DISPATCH_CALL(ksw_g2_wave_wmin);
 }
 
 /* Test-only: retained zr capacity for the active tier (see ksw.cpp). */

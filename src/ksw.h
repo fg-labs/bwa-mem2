@@ -141,6 +141,14 @@ extern "C" {
 	unsigned long ksw_g2_wave_exec_count(void);
 	unsigned long ksw_g2_wave16_exec_count(void);
 
+	/* Test-only hook (see ksw.cpp): the int16 and int32 wavefront width
+	 * crossovers (KSW_WAVE16_WMIN / KSW_WAVE_WMIN) the active tier was compiled
+	 * with, 0 where the tier has no such kernel. Lets the unit test assert which
+	 * kernel a given band width routes to against the real per-tier constants.
+	 * Not used on any production path. */
+	int ksw_g2_wave16_wmin(void);
+	int ksw_g2_wave_wmin(void);
+
 	/* Test-only hook (see ksw.cpp): retained capacity (bytes) of the per-thread
 	 * wavefront direction-byte store zr. Lets the unit test prove the windowed
 	 * decay policy in KswWaveScratch::ensure() actually releases zr after a wide

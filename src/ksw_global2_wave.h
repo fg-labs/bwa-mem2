@@ -635,10 +635,16 @@ static int ksw_g2_wave(int qlen,const uint8_t*query,int tlen,const uint8_t*targe
  * AVX2 kernel exactly at half the element width (pre-reversed query buffer, 2-level
  * vpshufb table, bitwise select). jv is derived from the scalar (s-i0), not from
  * s, because s=i+j can exceed int16 range on long reads even when i,j do not.
- * Crossover: 16-lane int16 only overtakes the 8-lane int32 kernel at wide bands
- * (w>=33 on Sapphire Rapids, clang-19, 150bp/b=4); in the w~20-32 band int32 is
- * ~1% faster, so WMIN=33 keeps int16 to the region where it is a clear net win. */
-#define KSW_WAVE16_WMIN 33
+ * Crossover: on the AVX2 hosts that actually run this tier (AMD Zen 3, clang-19,
+ * 150 bp / b=4, whole aligner) the 16-lane int16 kernel beats the scalar
+ * fallback from w~10 and the whole-aligner sweep over WMIN in {33, 26, 20, 16,
+ * 10, 8, 6, 4} is -0.4 to -1.0% user CPU for every value at or below 20, with
+ * no clear floor; 10 is the shipped value, matching the AVX-512BW tier's
+ * constant. The former 33 came from Sapphire Rapids running the AVX2 tier,
+ * where the 8-lane int32 kernel was ~1% faster than int16 in the w~20-32
+ * band -- that host ships the AVX-512BW objects, so the AVX2 constant is
+ * tuned for the hosts that use it. */
+#define KSW_WAVE16_WMIN 10
 // >= mask for signed int16: !(a<b) = !(b>a).
 static inline __m256i cmge16(__m256i a,__m256i b){ return _mm256_andnot_si256(_mm256_cmpgt_epi16(b,a),_mm256_set1_epi32(-1)); }
 

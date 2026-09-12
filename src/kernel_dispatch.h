@@ -60,6 +60,8 @@
     * ksw_global2_scalar_ref. The int16 variant counts only int16-kernel entries. */
 #  define ksw_g2_wave_exec_count BWAMEM3_PASTE(ksw_g2_wave_exec_count, KERNEL_VARIANT)
 #  define ksw_g2_wave16_exec_count BWAMEM3_PASTE(ksw_g2_wave16_exec_count, KERNEL_VARIANT)
+#  define ksw_g2_wave16_wmin  BWAMEM3_PASTE(ksw_g2_wave16_wmin,  KERNEL_VARIANT)
+#  define ksw_g2_wave_wmin    BWAMEM3_PASTE(ksw_g2_wave_wmin,    KERNEL_VARIANT)
 #  define ksw_g2_wave_zr_capacity BWAMEM3_PASTE(ksw_g2_wave_zr_capacity, KERNEL_VARIANT)
 #  define ksw_extend          BWAMEM3_PASTE(ksw_extend,          KERNEL_VARIANT)
 #  define ksw_global          BWAMEM3_PASTE(ksw_global,          KERNEL_VARIANT)
