@@ -269,7 +269,13 @@ int HTStatus()
 // allocation sequence instead of re-implementing it and drifting out of sync.
 void worker_alloc(const mem_opt_t *opt, worker_t &w, int32_t nreads, int32_t nthreads)
 {
-    assert(opt != NULL);
+    /* Exported entry point (library consumers build a worker_t through it),
+     * so opt is caller input rather than something this file constructs, and
+     * it is dereferenced throughout. Keep the NULL check live in every build.
+     * nreads/nthreads stay plain asserts: the code below tolerates both
+     * out-of-range values (nthreads is clamped, a non-positive nreads skips
+     * the regs allocation), so neither gates a memory access. */
+    xassert(opt != NULL, "opt must not be NULL");
     assert(nreads >= 0);
     assert(nthreads > 0);
     /* The assert above compiles out under NDEBUG, and the chaining scratch is
