@@ -14,6 +14,7 @@ fail() {
     exit 1
 }
 ok() { echo "OK:   $*"; }
+skip() { echo "SKIP: $*"; }
 
 [[ -x "$BWAMEM3" ]] || fail "bwa-mem3 not built at $BWAMEM3 (run 'make' or 'make arm64' first)"
 
@@ -213,6 +214,61 @@ if OUT="$(cd "$HERE" && ./backwardext_parity_test "$FIXTURES/phix.fa" 2>&1)"; th
 else
     echo "$OUT"
     fail "backwardext_parity_test: non-zero exit"
+fi
+
+# --- sa_resolve_parity_test ------------------------------------------------
+# The pipelined compressed-SA resolver (get_sa_entries_prefetch / call_one_step)
+# vs a scalar LF walk computed straight from the checkpoint blocks, over every
+# SA row of the fixture plus strided multi-occurrence intervals; gates the
+# arm64 branchless symbol test and NEON occurrence popcount in call_one_step.
+if OUT="$(cd "$HERE" && env -u BWA3_SA_LANES ./sa_resolve_parity_test "$FIXTURES/phix.fa" 2>&1)"; then
+    if echo "$OUT" | grep -q "SA resolve PARITY PASS"; then
+        ok "sa_resolve_parity_test"
+    elif echo "$OUT" | grep -q "SA resolve PARITY SKIP"; then
+        skip "sa_resolve_parity_test (non-AArch64)"
+    else
+        echo "$OUT"
+        fail "sa_resolve_parity_test: no PASS or SKIP line"
+    fi
+else
+    echo "$OUT"
+    fail "sa_resolve_parity_test: non-zero exit"
+fi
+
+# Same parity gate, but with the resolver's lane count forced to 1 (the
+# non-default extreme of BWA3_SA_LANES). The lane count is a prefetch-depth
+# knob only -- coordinates are stored by position -- so a PASS here against the
+# same scalar oracle pins that "the lane count does not affect results".
+if OUT="$(cd "$HERE" && BWA3_SA_LANES=1 ./sa_resolve_parity_test "$FIXTURES/phix.fa" 2>&1)"; then
+    if echo "$OUT" | grep -q "SA resolve PARITY PASS"; then
+        ok "sa_resolve_parity_test (BWA3_SA_LANES=1)"
+    elif echo "$OUT" | grep -q "SA resolve PARITY SKIP"; then
+        skip "sa_resolve_parity_test (BWA3_SA_LANES=1, non-AArch64)"
+    else
+        echo "$OUT"
+        fail "sa_resolve_parity_test (BWA3_SA_LANES=1): no PASS or SKIP line"
+    fi
+else
+    echo "$OUT"
+    fail "sa_resolve_parity_test (BWA3_SA_LANES=1): non-zero exit"
+fi
+
+# Same parity gate, but with the resolver's lane count forced to 64 (the
+# non-default extreme of BWA3_SA_LANES). The lane count is a prefetch-depth
+# knob only -- coordinates are stored by position -- so a PASS here against the
+# same scalar oracle pins that "the lane count does not affect results".
+if OUT="$(cd "$HERE" && BWA3_SA_LANES=64 ./sa_resolve_parity_test "$FIXTURES/phix.fa" 2>&1)"; then
+    if echo "$OUT" | grep -q "SA resolve PARITY PASS"; then
+        ok "sa_resolve_parity_test (BWA3_SA_LANES=64)"
+    elif echo "$OUT" | grep -q "SA resolve PARITY SKIP"; then
+        skip "sa_resolve_parity_test (BWA3_SA_LANES=64, non-AArch64)"
+    else
+        echo "$OUT"
+        fail "sa_resolve_parity_test (BWA3_SA_LANES=64): no PASS or SKIP line"
+    fi
+else
+    echo "$OUT"
+    fail "sa_resolve_parity_test (BWA3_SA_LANES=64): non-zero exit"
 fi
 
 # --- long-read end-to-end (issue 44) --------------------------------------

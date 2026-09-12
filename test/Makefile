@@ -15,7 +15,7 @@
 ##  direct builds — see the ARM branch below).
 ##*****************************************************************************
 
-EXE = fmi_test smem2_test bwt_seed_strategy_test sa2ref_test xeonbsw bandedswa_zdrop_eweight_test smem_lockstep_parity_test bwtseed_lockstep_parity_test backwardext_konly_parity_test sa_lookup_sentinel_parity_test backwardext_parity_test header_insert_test packed_text_test system_test
+EXE = fmi_test smem2_test bwt_seed_strategy_test sa2ref_test xeonbsw bandedswa_zdrop_eweight_test smem_lockstep_parity_test bwtseed_lockstep_parity_test backwardext_konly_parity_test sa_lookup_sentinel_parity_test backwardext_parity_test sa_resolve_parity_test header_insert_test packed_text_test system_test
 
 # Doctest binaries — rules populated in Task 14 (unit) and Task 15
 # (integration). Listed separately from $(EXE) so `all` and
@@ -277,6 +277,9 @@ sa_lookup_sentinel_parity_test: sa_lookup_sentinel_parity_test.o ../libbwa.a
 backwardext_parity_test: backwardext_parity_test.o ../libbwa.a
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
+sa_resolve_parity_test: sa_resolve_parity_test.o ../libbwa.a
+	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
+
 header_insert_test: header_insert_test.o ../libbwa.a
 	$(CXX) $(LDFLAGS) -o $@ $(filter %.o,$^) $(LIBS)
 
@@ -345,4 +348,5 @@ bwtseed_lockstep_parity_test.o: $(FMI_TEST_HEADERS)
 backwardext_konly_parity_test.o: $(FMI_TEST_HEADERS)
 sa_lookup_sentinel_parity_test.o: $(FMI_TEST_HEADERS)
 backwardext_parity_test.o: $(FMI_TEST_HEADERS)
+sa_resolve_parity_test.o: $(FMI_TEST_HEADERS)
 header_insert_test.o: ../src/bwa.h
