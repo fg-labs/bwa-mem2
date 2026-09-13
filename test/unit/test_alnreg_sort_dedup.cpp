@@ -289,6 +289,13 @@ extern void bwamem3_dedup_perm_sort_by_score(int n, mem_alnreg_t *a);
 // checked against the same oracle on rescue-shaped inputs AND on inputs that
 // violate the rescue invariant. The counters prove which path a fixture took.
 extern void bwamem3_dedup_incr_sort_by_score(int n, mem_alnreg_t *a, const uint32_t *idx, int n_in);
+// The incremental `re` sort: starts from the records' own dedup_re_rank values
+// (the previous dedup call's `re` order, stamped on its survivors), inserts the
+// unranked ones, same budget / pdqsort / tie-scan / introsort-fallback scheme.
+extern void bwamem3_dedup_incr_sort_by_re(int n, mem_alnreg_t *a);
+extern void bwamem3_dedup_incr_re_stats(unsigned long *calls, unsigned long *budget_exhausted,
+                                        unsigned long *tie_fallback, unsigned long *rank_rejected,
+                                        unsigned long *moves, int reset);
 extern void bwamem3_dedup_incremental_set(int on);
 extern void bwamem3_dedup_incr_stats(unsigned long *calls, unsigned long *budget_exhausted,
                                      unsigned long *tie_fallback, unsigned long *moves, int reset);
@@ -675,10 +682,12 @@ TEST_CASE("mem_sort_dedup_patch on a rescue sequence is byte-identical with the 
     REQUIRE(opt->alnreg_sort_fast == 0);
     Rng rng(0x9e370008ULL);
     bwamem3_dedup_incr_stats(NULL, NULL, NULL, NULL, 1);
+    bwamem3_dedup_incr_re_stats(NULL, NULL, NULL, NULL, NULL, 1);
     // Budget hits during the FIRST call of each fixture, whose input is in
-    // random order (in production that call is the extension-site one, which
-    // is not incremental); every later call must stay within budget.
-    unsigned long seed_budget = 0;
+    // random order and carries no ranks (in production that call is the
+    // extension-site one, which is not incremental); every later call must
+    // stay within budget for both sorts and never reject its ranks.
+    unsigned long seed_budget = 0, seed_re_budget = 0;
     for (int t = 0; t < 60; ++t) {
         const int n0 = 9 + 4 * t;
         // Two identical runs from the same seed and fixture.
@@ -689,14 +698,16 @@ TEST_CASE("mem_sort_dedup_patch on a rescue sequence is byte-identical with the 
             Rng r2(0x1234ULL + static_cast<uint64_t>(t));
             std::vector<mem_alnreg_t> a(seed);
             for (int round = 0; round < 4; ++round) {
-                unsigned long b_before = 0, b_after = 0;
+                unsigned long b_before = 0, b_after = 0, rb_before = 0, rb_after = 0;
                 bwamem3_dedup_incr_stats(NULL, &b_before, NULL, NULL, 0);
+                bwamem3_dedup_incr_re_stats(NULL, &rb_before, NULL, NULL, NULL, 0);
                 int n = mem_sort_dedup_patch(opt, NULL, NULL, NULL,
                                              static_cast<int>(a.size()), a.data(), NULL);
                 REQUIRE(n >= 0);
                 a.resize(static_cast<size_t>(n));
                 bwamem3_dedup_incr_stats(NULL, &b_after, NULL, NULL, 0);
-                if (round == 0) seed_budget += b_after - b_before;
+                bwamem3_dedup_incr_re_stats(NULL, &rb_after, NULL, NULL, NULL, 0);
+                if (round == 0) { seed_budget += b_after - b_before; seed_re_budget += rb_after - rb_before; }
                 const int k = r2.in(1, 4);
                 std::vector<mem_alnreg_t> news = random_regs(r2, k, 0);
                 for (int i = 0; i < k; ++i) {
@@ -727,6 +738,15 @@ TEST_CASE("mem_sort_dedup_patch on a rescue sequence is byte-identical with the 
     CHECK(calls > 0);
     CHECK(budget == seed_budget);
     CHECK(moves > 0);
+    unsigned long re_calls = 0, re_budget = 0, re_rejected = 0, re_moves = 0;
+    bwamem3_dedup_incr_re_stats(&re_calls, &re_budget, NULL, &re_rejected, &re_moves, 1);
+    // The `re` fast path ran, the ranks stamped by the previous call were a
+    // valid order (never rejected), only the seed calls (no ranks) hit the
+    // budget, and the rescued records were moved into place.
+    CHECK(re_calls > 0);
+    CHECK(re_rejected == 0);
+    CHECK(re_budget == seed_re_budget);
+    CHECK(re_moves > 0);
     free(opt);
 }
 TEST_CASE("the primary-marking sorts are byte-identical to unconditional ks_introsort"
@@ -768,4 +788,123 @@ TEST_CASE("the primary-marking sorts are byte-identical to unconditional ks_intr
     SUBCASE("alt-aware primary-marking sort (by hash)") {
         check_variant({bwamem3_primary_sort_by_hash_alt, bwamem3_primary_sort_by_hash_alt_exact, true});
     }
+}
+
+namespace {
+
+// A rescue-shaped input for the `re` sort: `n_old` records sorted by `re` as
+// the previous call's window pass left them, ranks stamped from that order,
+// then permuted into by-score order (as that call's closing sort does -- the
+// ranks travel with the records), then `k` unranked records inserted by the
+// rescue rule. `re_pool` > 0 draws ends from a small pool so equal-`re` ties
+// (the introsort fallback) are common; 0 keeps every `re` distinct.
+std::vector<mem_alnreg_t> re_rescue_shaped(Rng &rng, int n_old, int k, int re_pool) {
+    std::vector<mem_alnreg_t> a = random_regs(rng, n_old, re_pool);
+    bwamem3_dedup_sort_by_re_exact(static_cast<int>(a.size()), a.data());
+    for (int i = 0; i < n_old; ++i) a[static_cast<size_t>(i)].dedup_re_rank = i + 1;
+    bwamem3_dedup_sort_by_score_exact(static_cast<int>(a.size()), a.data());
+    std::vector<mem_alnreg_t> news = random_regs(rng, k, 0);
+    for (int i = 0; i < k; ++i) {
+        // Land the new ends anywhere across (and beyond) the old range so the
+        // inserts travel to arbitrary positions of the ranked order. The old
+        // ends are all == 1 (mod 37); the extra 2 + i keeps each new end off
+        // that residue and off the other inserts', so the tie-free fixtures
+        // really are tie-free.
+        const int64_t shift = ((i & 1) ? -(rng.in(0, 40) * 37) : rng.in(1, 40) * 37 + 37 * n_old) + 2 + i;
+        news[static_cast<size_t>(i)].rb += shift;
+        news[static_cast<size_t>(i)].re += shift;
+        news[static_cast<size_t>(i)].dedup_re_rank = 0;
+        rescue_insert(a, news[static_cast<size_t>(i)]);
+    }
+    return a;
+}
+
+bool incr_re_agrees(const std::vector<mem_alnreg_t> &in, bool *saw_tie) {
+    return agrees(in, bwamem3_dedup_incr_sort_by_re, bwamem3_dedup_sort_by_re_exact, tied_by_re, saw_tie);
+}
+
+}  // namespace
+
+TEST_CASE("the incremental `re` sort is byte-identical to ks_introsort on rescue-shaped input"
+          * doctest::test_suite("unit/alnreg_sort_dedup")) {
+    bwamem3_dedup_incr_re_stats(NULL, NULL, NULL, NULL, NULL, 1);
+    Rng rng(0x9e370040ULL);
+    bool saw_tie = false;
+    const int sizes[] = {9, 10, 16, 33, 64, 128, 300, 600};
+    for (int si = 0; si < 8; ++si)
+        for (int k = 1; k <= 8; ++k)
+            for (int t = 0; t < 12; ++t)
+                CHECK(incr_re_agrees(re_rescue_shaped(rng, sizes[si], k, 0), &saw_tie));
+    CHECK_FALSE(saw_tie);
+    unsigned long calls = 0, budget = 0, tie = 0, rejected = 0, moves = 0;
+    bwamem3_dedup_incr_re_stats(&calls, &budget, &tie, &rejected, &moves, 1);
+    CHECK(calls == 8UL * 8UL * 12UL);
+    CHECK(budget == 0);      // k <= 8 inserts never exhaust 8n + 64 moves
+    CHECK(tie == 0);
+    CHECK(rejected == 0);    // the stamped ranks were a valid partial permutation
+    CHECK(moves > 0);        // the inserts really were moved into place
+}
+
+TEST_CASE("the incremental `re` sort stays byte-identical with corrupted or absent ranks"
+          * doctest::test_suite("unit/alnreg_sort_dedup")) {
+    Rng rng(0x9e370050ULL);
+    bool saw_tie = false;
+    unsigned long budget = 0, rejected = 0;
+    {   // all ranks zero: nothing ranked, input (by-score) order, budget path
+        bwamem3_dedup_incr_re_stats(NULL, NULL, NULL, NULL, NULL, 1);
+        for (int t = 0; t < 100; ++t) {
+            std::vector<mem_alnreg_t> a = re_rescue_shaped(rng, 20 + 5 * t, 2, 0);
+            for (size_t i = 0; i < a.size(); ++i) a[i].dedup_re_rank = 0;
+            CHECK(incr_re_agrees(a, &saw_tie));
+        }
+        bwamem3_dedup_incr_re_stats(NULL, &budget, NULL, &rejected, NULL, 1);
+        CHECK(budget > 0);
+        CHECK(rejected == 0);
+    }
+    {   // duplicate ranks (not a valid permutation): rejected, still identical
+        bwamem3_dedup_incr_re_stats(NULL, NULL, NULL, NULL, NULL, 1);
+        for (int t = 0; t < 100; ++t) {
+            std::vector<mem_alnreg_t> a = re_rescue_shaped(rng, 20 + 5 * t, 2, 0);
+            a[0].dedup_re_rank = a[1].dedup_re_rank = 1;
+            CHECK(incr_re_agrees(a, &saw_tie));
+        }
+        bwamem3_dedup_incr_re_stats(NULL, NULL, NULL, &rejected, NULL, 1);
+        CHECK(rejected == 100);
+    }
+    {   // out-of-range and negative ranks: rejected, still identical
+        bwamem3_dedup_incr_re_stats(NULL, NULL, NULL, NULL, NULL, 1);
+        for (int t = 0; t < 100; ++t) {
+            std::vector<mem_alnreg_t> a = re_rescue_shaped(rng, 20 + 5 * t, 2, 0);
+            a[3].dedup_re_rank = (t & 1) ? static_cast<int32_t>(a.size()) + 7 : -5;
+            CHECK(incr_re_agrees(a, &saw_tie));
+        }
+        bwamem3_dedup_incr_re_stats(NULL, NULL, NULL, &rejected, NULL, 1);
+        CHECK(rejected == 100);
+    }
+    {   // reversed ranks: a valid permutation in the worst order; budget, still identical
+        bwamem3_dedup_incr_re_stats(NULL, NULL, NULL, NULL, NULL, 1);
+        for (int t = 0; t < 60; ++t) {
+            std::vector<mem_alnreg_t> a = re_rescue_shaped(rng, 30 + 10 * t, 0, 0);
+            const int n = static_cast<int>(a.size());
+            for (int i = 0; i < n; ++i) a[static_cast<size_t>(i)].dedup_re_rank = n - a[static_cast<size_t>(i)].dedup_re_rank + 1;
+            CHECK(incr_re_agrees(a, &saw_tie));
+        }
+        bwamem3_dedup_incr_re_stats(NULL, &budget, NULL, &rejected, NULL, 1);
+        CHECK(budget > 0);
+        CHECK(rejected == 0);
+    }
+    CHECK_FALSE(saw_tie);
+}
+
+TEST_CASE("the incremental `re` sort takes the introsort fallback on equal-`re` ties"
+          * doctest::test_suite("unit/alnreg_sort_dedup")) {
+    bwamem3_dedup_incr_re_stats(NULL, NULL, NULL, NULL, NULL, 1);
+    Rng rng(0x9e370060ULL);
+    bool saw_tie = false;
+    for (int t = 0; t < 150; ++t)
+        CHECK(incr_re_agrees(re_rescue_shaped(rng, 9 + t, 3, 3), &saw_tie));
+    CHECK(saw_tie);
+    unsigned long tie = 0;
+    bwamem3_dedup_incr_re_stats(NULL, NULL, &tie, NULL, NULL, 1);
+    CHECK(tie > 0);
 }
