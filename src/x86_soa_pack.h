@@ -1,14 +1,15 @@
 /* SPDX-License-Identifier: MIT */
-/* x86_soa_pack.h -- tiled SoA packing for the AVX2 / AVX-512BW 8-bit batch
- * wrappers (kswv mate rescue, bandedSWA extension): the x86 counterpart of
- * the tiled packing the NEON batch wrappers use (neon_soa_pack.h, which lands
- * with the NEON wrapper changes; the two headers share the same contract).
+/* x86_soa_pack.h -- tiled SoA packing for the AVX2 / AVX-512BW batch wrappers
+ * (kswv mate rescue, bandedSWA extension), 8-bit lanes (x86_soa_pack) and
+ * 16-bit lanes (x86_soa_pack_u16): the x86 counterpart of the tiled packing
+ * the NEON batch wrappers use (neon_soa_pack.h, which lands with the NEON
+ * wrapper changes; the headers share the same contract).
  *
- * The 8-bit kernels read their sequences in SoA form: row k holds position k
- * of every lane, SIMD_WIDTH8 bytes per row. The wrappers built that layout
- * with one strided byte store per base. Here each lane's bytes are loaded 16
- * at a time and a register transpose turns 16 positions of every lane into 16
- * SoA rows.
+ * The kernels read their sequences in SoA form: row k holds position k of
+ * every lane, SIMD_WIDTH8 bytes (or SIMD_WIDTH16 halfwords) per row. The
+ * wrappers built that layout with one strided store per base. Here each
+ * lane's bytes are loaded 16 (or 8) at a time and a register transpose turns
+ * 16 (or 8) positions of every lane into that many SoA rows.
  *
  * The transpose is the 16x16 byte zip network (bytes, halfwords, words,
  * doublewords). On x86 the unpacklo/unpackhi instructions operate within
@@ -176,6 +177,142 @@ static inline void x86_soa_pack(uint8_t *soa,
                 t[j] = _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
             }
             x86_transpose16x16_u8_x2(t);
+            for (int k = kb; k < kend; k++)
+                _mm256_store_si256((__m256i *)(soa + (size_t)k * W), t[k - kb]);
+        }
+    }
+}
+
+
+/* ---- 16-bit lanes: the same scheme for the int16 kernels' SoA (row k = W
+ * halfwords, 8 positions per tile). Each lane's 8 bytes are loaded, widened
+ * to halfwords, remapped (remapFrom -> remapTo), transposed 8x8 per 128-bit
+ * lane and stored as 8 SoA rows. The remap is applied only to real bases, so
+ * pad bytes are never rewritten even if padA or padB equals remapFrom (a full
+ * tile inside the sequence is all real bases, so the whole-vector blend below
+ * is safe; the boundary tile remaps byte-wise only where k < len). Contract
+ * per lane, rows [0, nrows):
+ *     seq[k]  (remapFrom -> remapTo)   for k <  len
+ *     padA                             for len <= k < padStart
+ *     padB                             for k >= padStart
+ * with len <= padStart as for the 8-bit pack. */
+static inline __m128i x86_soa_piece8_u16(const uint8_t *seq, int len, int padStart, int kb,
+                                         uint16_t padA, uint16_t padB,
+                                         uint16_t remapFrom, uint16_t remapTo,
+                                         __m128i fromv, __m128i tov, __m128i padBv)
+{
+    if (kb + 8 <= len) {
+        __m128i v = _mm_cvtepu8_epi16(_mm_loadl_epi64((const __m128i *)(seq + kb)));
+        return _mm_blendv_epi8(v, tov, _mm_cmpeq_epi16(v, fromv));
+    }
+    if (kb >= padStart) return padBv;
+    uint16_t tmp[8];
+    for (int t = 0; t < 8; t++) {
+        const int k = kb + t;
+        if (k < len)
+            tmp[t] = (seq[k] == remapFrom) ? remapTo : (uint16_t)seq[k];
+        else
+            tmp[t] = (k < padStart) ? padA : padB;
+    }
+    return _mm_loadu_si128((const __m128i *)tmp);
+}
+
+/* 8x8 halfword transpose per 128-bit lane of 8 __m256i: on entry r[j] holds
+ * 8 consecutive positions of lane j (low half) and lane j+8 (high half); on
+ * return r[k] holds position k of lanes 0..7 then 8..15 -- SoA row k. */
+static inline void x86_transpose8x8_u16_x2(__m256i r[8])
+{
+    __m256i a[8];
+    for (int p = 0; p < 4; p++) {                 /* lanes (2p, 2p+1): k 0-3 | 4-7 */
+        a[2 * p]     = _mm256_unpacklo_epi16(r[2 * p], r[2 * p + 1]);
+        a[2 * p + 1] = _mm256_unpackhi_epi16(r[2 * p], r[2 * p + 1]);
+    }
+    __m256i b[8];
+    for (int h = 0; h < 2; h++) {                 /* lanes 4h..4h+3: k pairs (0,1) .. (6,7) */
+        b[4 * h]     = _mm256_unpacklo_epi32(a[4 * h],     a[4 * h + 2]);
+        b[4 * h + 1] = _mm256_unpackhi_epi32(a[4 * h],     a[4 * h + 2]);
+        b[4 * h + 2] = _mm256_unpacklo_epi32(a[4 * h + 1], a[4 * h + 3]);
+        b[4 * h + 3] = _mm256_unpackhi_epi32(a[4 * h + 1], a[4 * h + 3]);
+    }
+    for (int m = 0; m < 4; m++) {                 /* lanes 0-3 | 4-7 -> rows 2m, 2m+1 */
+        r[2 * m]     = _mm256_unpacklo_epi64(b[m], b[4 + m]);
+        r[2 * m + 1] = _mm256_unpackhi_epi64(b[m], b[4 + m]);
+    }
+}
+
+#if defined(__AVX512BW__)
+/* Same network on __m512i: four 8-lane groups per register (lanes j, j+8,
+ * j+16, j+24), so r[k] is the 32-halfword SoA row k. */
+static inline void x86_transpose8x8_u16_x4(__m512i r[8])
+{
+    __m512i a[8];
+    for (int p = 0; p < 4; p++) {
+        a[2 * p]     = _mm512_unpacklo_epi16(r[2 * p], r[2 * p + 1]);
+        a[2 * p + 1] = _mm512_unpackhi_epi16(r[2 * p], r[2 * p + 1]);
+    }
+    __m512i b[8];
+    for (int h = 0; h < 2; h++) {
+        b[4 * h]     = _mm512_unpacklo_epi32(a[4 * h],     a[4 * h + 2]);
+        b[4 * h + 1] = _mm512_unpackhi_epi32(a[4 * h],     a[4 * h + 2]);
+        b[4 * h + 2] = _mm512_unpacklo_epi32(a[4 * h + 1], a[4 * h + 3]);
+        b[4 * h + 3] = _mm512_unpackhi_epi32(a[4 * h + 1], a[4 * h + 3]);
+    }
+    for (int m = 0; m < 4; m++) {
+        r[2 * m]     = _mm512_unpacklo_epi64(b[m], b[4 + m]);
+        r[2 * m + 1] = _mm512_unpackhi_epi64(b[m], b[4 + m]);
+    }
+}
+#endif /* __AVX512BW__ */
+
+/* Pack W lanes' byte sequences into the W-lane int16 SoA layout (row k =
+ * position k of every lane, W halfwords per row, rows [0, nrows) written). W
+ * is the kernel's SIMD_WIDTH16: 16 on the AVX2 tier, 32 on AVX-512BW (W == 32
+ * needs an AVX-512BW build). `soa` is the kernel's 64-byte-aligned buffer, so
+ * every row store is aligned. Byte-for-byte the scalar fill's output. */
+template <int W>
+static inline void x86_soa_pack_u16(uint16_t *soa,
+                                    const uint8_t *const seq[W],
+                                    const int len[W],
+                                    const int padStart[W],
+                                    int nrows, uint16_t padA, uint16_t padB,
+                                    uint16_t remapFrom, uint16_t remapTo)
+{
+#if defined(__AVX512BW__)
+    static_assert(W == 16 || W == 32, "x86_soa_pack_u16: W must be the AVX2 (16) or AVX-512BW (32) lane count");
+#else
+    static_assert(W == 16, "x86_soa_pack_u16: W == 32 needs an AVX-512BW build; this build packs 16 lanes");
+#endif
+    for (int j = 0; j < W; j++) assert(len[j] <= padStart[j]);
+    const __m128i fromv = _mm_set1_epi16((short)remapFrom);
+    const __m128i tov   = _mm_set1_epi16((short)remapTo);
+    const __m128i padBv = _mm_set1_epi16((short)padB);
+    for (int kb = 0; kb < nrows; kb += 8) {
+        const int kend = (kb + 8 < nrows) ? kb + 8 : nrows;
+#if defined(__AVX512BW__)
+        if (W == 32) {
+            __m512i t[8];
+            for (int j = 0; j < 8; j++) {
+                __m512i v = _mm512_castsi128_si512(
+                    x86_soa_piece8_u16(seq[j], len[j], padStart[j], kb, padA, padB, remapFrom, remapTo, fromv, tov, padBv));
+                v = _mm512_inserti32x4(v, x86_soa_piece8_u16(seq[j + 8],  len[j + 8],  padStart[j + 8],  kb, padA, padB, remapFrom, remapTo, fromv, tov, padBv), 1);
+                v = _mm512_inserti32x4(v, x86_soa_piece8_u16(seq[j + 16], len[j + 16], padStart[j + 16], kb, padA, padB, remapFrom, remapTo, fromv, tov, padBv), 2);
+                v = _mm512_inserti32x4(v, x86_soa_piece8_u16(seq[j + 24], len[j + 24], padStart[j + 24], kb, padA, padB, remapFrom, remapTo, fromv, tov, padBv), 3);
+                t[j] = v;
+            }
+            x86_transpose8x8_u16_x4(t);
+            for (int k = kb; k < kend; k++)
+                _mm512_store_si512((__m512i *)(soa + (size_t)k * W), t[k - kb]);
+            continue;
+        }
+#endif
+        {
+            __m256i t[8];
+            for (int j = 0; j < 8; j++) {
+                const __m128i lo = x86_soa_piece8_u16(seq[j],     len[j],     padStart[j],     kb, padA, padB, remapFrom, remapTo, fromv, tov, padBv);
+                const __m128i hi = x86_soa_piece8_u16(seq[j + 8], len[j + 8], padStart[j + 8], kb, padA, padB, remapFrom, remapTo, fromv, tov, padBv);
+                t[j] = _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
+            }
+            x86_transpose8x8_u16_x2(t);
             for (int k = kb; k < kend; k++)
                 _mm256_store_si256((__m256i *)(soa + (size_t)k * W), t[k - kb]);
         }
