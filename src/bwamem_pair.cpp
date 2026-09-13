@@ -835,7 +835,18 @@ int mem_pair(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, cons
         }
     }
 
-    ks_introsort_128(v.n, v.a);
+    /* Both sorts in this function run on keys that are pairwise distinct by
+     * construction: v's `y` ends in `i << 2 | strand << 1 | r`, and (i, r) is
+     * distinct per element (score and strand ride along); u's `y` is the
+     * (k, i) pair, pushed at most once per (k, i). So the sorted order is
+     * unique and pdqsort gives the same array as the klib introsort it
+     * replaces (faster on the sort microbench's 9-32 element bucket; measured
+     * whole-aligner in the PR). Tested against ks_introsort_128 in
+     * test/unit/test_pair64_sort.cpp. The strict-order check after each sort
+     * turns a future key change that breaks distinctness into a hard failure
+     * instead of a silently different pairing on ties. */
+    if (v.n > 1) pdqsort_128(v.n, v.a);  // v.a is null when no candidates were pushed; PDQSORT_INIT forms a + n, UB on a null pointer
+    xassert(pair64_strictly_sorted(v.n, v.a), "mem_pair: candidate keys must be pairwise distinct");
     y[0] = y[1] = y[2] = y[3] = -1;
     for (i = 0; i < v.n; ++i) {
         for (r = 0; r < 2; ++r) { // loop through direction
@@ -872,7 +883,8 @@ int mem_pair(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, cons
         int tmp = opt->a + opt->b;
         tmp = tmp > opt->o_del + opt->e_del? tmp : opt->o_del + opt->e_del;
         tmp = tmp > opt->o_ins + opt->e_ins? tmp : opt->o_ins + opt->e_ins;
-        ks_introsort_128(u.n, u.a);
+        pdqsort_128(u.n, u.a);   /* unique keys, see above */
+        xassert(pair64_strictly_sorted(u.n, u.a), "mem_pair: pair keys must be pairwise distinct");
         i = u.a[u.n-1].y >> 32; k = u.a[u.n-1].y << 32 >> 32;
         z[v.a[i].y&1] = v.a[i].y<<32>>34; // index of the best pair
         z[v.a[k].y&1] = v.a[k].y<<32>>34;

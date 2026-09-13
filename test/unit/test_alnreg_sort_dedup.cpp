@@ -292,6 +292,16 @@ extern void bwamem3_dedup_incr_sort_by_score(int n, mem_alnreg_t *a, const uint3
 extern void bwamem3_dedup_incremental_set(int on);
 extern void bwamem3_dedup_incr_stats(unsigned long *calls, unsigned long *budget_exhausted,
                                      unsigned long *tie_fallback, unsigned long *moves, int reset);
+// The primary-marking sorts (mem_mark_primary_se): the same tie-detected
+// pdqsort scheme on the (score, is_alt, hash) comparators, against the
+// unconditional introsort they must reproduce. As for every sort here, the
+// contract under test is the RESULT; whether the pdqsort fast path was engaged
+// (rather than the introsort it must equal) is not observable from the array
+// and is covered by the whole-aligner throughput measurement, not by this file.
+extern void bwamem3_primary_sort_by_hash(int n, mem_alnreg_t *a);
+extern void bwamem3_primary_sort_by_hash_exact(int n, mem_alnreg_t *a);
+extern void bwamem3_primary_sort_by_hash_alt(int n, mem_alnreg_t *a);
+extern void bwamem3_primary_sort_by_hash_alt_exact(int n, mem_alnreg_t *a);
 
 namespace {
 
@@ -552,6 +562,28 @@ bool incr_agrees_scattered(Rng &rng, const std::vector<mem_alnreg_t> &in, bool *
         if (tied_by_score(e[i - 1], e[i])) { *saw_tie = true; break; }
     return same_records(f, e);
 }
+// A tie under either primary-marking comparator: equal score, is_alt and hash.
+bool tied_by_hash(const mem_alnreg_t &x, const mem_alnreg_t &y) {
+    return x.score == y.score && x.is_alt == y.is_alt && x.hash == y.hash;
+}
+
+// Regions as mem_mark_primary_se sees them: random score/is_alt, and a hash
+// that is either distinct per region (`hash_pool == 0`, the production case:
+// hash_64(id + i) is distinct per i) or drawn from a small pool so that ties
+// -- which in production need a 64-bit collision -- are common. seedcov is the
+// input index so a wrong permutation among tied records is observable.
+std::vector<mem_alnreg_t> primary_regs(Rng &rng, int n, int hash_pool, bool with_alt) {
+    std::vector<mem_alnreg_t> v = random_regs(rng, n, 0);
+    for (int i = 0; i < n; ++i) {
+        mem_alnreg_t &r = v[static_cast<size_t>(i)];
+        r.score = rng.in(30, 34);   // few distinct scores: long equal-score runs
+        r.is_alt = with_alt ? rng.in(0, 1) : 0;
+        r.hash = hash_pool > 0 ? 0x9e3779b97f4a7c15ULL * static_cast<uint64_t>(1 + rng.in(0, hash_pool - 1))
+                               : rng.next();
+        r.seedcov = i;
+    }
+    return v;
+}
 
 }  // namespace
 
@@ -696,4 +728,44 @@ TEST_CASE("mem_sort_dedup_patch on a rescue sequence is byte-identical with the 
     CHECK(budget == seed_budget);
     CHECK(moves > 0);
     free(opt);
+}
+TEST_CASE("the primary-marking sorts are byte-identical to unconditional ks_introsort"
+          * doctest::test_suite("unit/alnreg_sort_dedup")) {
+    // Each variant is its own named SUBCASE so doctest reports and
+    // --subcase-filters them independently. A shared lambda holds the three
+    // hash regimes; the seed rides on with_alt so each variant keeps the exact
+    // inputs it had as vi=0 (plain) / vi=1 (alt). Two distinctly-named subcases
+    // (not a loop of same-named ones) compose correctly with doctest's
+    // re-enter-per-subcase model.
+    struct Variant { sort_fn fast, exact; bool with_alt; };
+    auto check_variant = [](const Variant &v) {
+        const uint64_t s = v.with_alt ? 1u : 0u;
+        {   // distinct hashes: the production shape (no ties, pdqsort path)
+            Rng rng(0x9e370010ULL + s);
+            bool saw_tie = false;
+            for (int t = 0; t < 150; ++t)
+                CHECK(agrees(primary_regs(rng, 1 + t, 0, v.with_alt), v.fast, v.exact, tied_by_hash, &saw_tie));
+            CHECK_FALSE(saw_tie);
+        }
+        {   // colliding hashes: the introsort fallback
+            Rng rng(0x9e370020ULL + s);
+            bool saw_tie = false;
+            for (int t = 0; t < 150; ++t)
+                CHECK(agrees(primary_regs(rng, 1 + t, 3, v.with_alt), v.fast, v.exact, tied_by_hash, &saw_tie));
+            CHECK(saw_tie);
+        }
+        {   // mixed
+            Rng rng(0x9e370030ULL + s);
+            bool saw_tie = false;
+            for (int t = 0; t < 150; ++t)
+                CHECK(agrees(primary_regs(rng, 1 + t, 1 + t, v.with_alt), v.fast, v.exact, tied_by_hash, &saw_tie));
+            CHECK(saw_tie);
+        }
+    };
+    SUBCASE("plain primary-marking sort (by hash)") {
+        check_variant({bwamem3_primary_sort_by_hash, bwamem3_primary_sort_by_hash_exact, false});
+    }
+    SUBCASE("alt-aware primary-marking sort (by hash)") {
+        check_variant({bwamem3_primary_sort_by_hash_alt, bwamem3_primary_sort_by_hash_alt_exact, true});
+    }
 }

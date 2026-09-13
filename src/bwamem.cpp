@@ -829,7 +829,8 @@ static inline mem_alnreg_t *alnreg_save_buf(int n)
 
 /* Emit `static void fn(int n, mem_alnreg_t *a)` that sorts `a` exactly as
  * ks_introsort(name, n, a) would, but via pdqsort_##name whenever `lt` sees no
- * tie. `lt` must be the comparator KSORT_INIT and PDQSORT_INIT were given. */
+ * tie. `lt` must be the comparator KSORT_INIT and PDQSORT_INIT were given.
+ * Used for the dedup sorts below and the primary-marking sorts. */
 #define DEDUP_TIE_SORT_INIT(fn, name, lt)                                        \
     static void fn(int n, mem_alnreg_t *a)                                       \
     {                                                                            \
@@ -1162,6 +1163,29 @@ KSORT_INIT(mem_ars_hash, mem_alnreg_t, alnreg_hlt)
 
 #define alnreg_hlt2(a, b) ((a).is_alt < (b).is_alt || ((a).is_alt == (b).is_alt && ((a).score > (b).score || ((a).score == (b).score && (a).hash < (b).hash))))
 KSORT_INIT(mem_ars_hash2, mem_alnreg_t, alnreg_hlt2)
+
+/* The primary-marking sorts, via the same tie-detected pdqsort scheme as the
+ * dedup sorts (DEDUP_TIE_SORT_INIT, which backs both families): pdqsort when
+ * the sorted array has no tied adjacent pair -- then the order is unique and
+ * equals introsort's -- else restore the input and run the klib introsort so
+ * ties keep the permutation bwa-mem2's output is defined by. Both comparators
+ * end on `hash`, a 64-bit per-region value (hash_64(id + i)), so a tie needs a
+ * hash collision at equal score and is_alt and the fallback essentially never
+ * runs. Arrays below DEDUP_SORT_PDQ_MIN (9) take the introsort directly, as in
+ * the dedup sorts, since pdqsort wins nothing there; above it the whole-array
+ * ks_introsort of 112-byte records is replaced by pdqsort plus the save-copy
+ * and tie scan the scheme pays. */
+PDQSORT_INIT(mem_ars_hash,  mem_alnreg_t, alnreg_hlt)
+PDQSORT_INIT(mem_ars_hash2, mem_alnreg_t, alnreg_hlt2)
+DEDUP_TIE_SORT_INIT(primary_sort_by_hash,     mem_ars_hash,  alnreg_hlt)
+DEDUP_TIE_SORT_INIT(primary_sort_by_hash_alt, mem_ars_hash2, alnreg_hlt2)
+
+/* Exposed for test/unit/test_alnreg_sort_dedup.cpp: the tie-detected form and
+ * the unconditional introsort it must reproduce, array for array. */
+void bwamem3_primary_sort_by_hash(int n, mem_alnreg_t *a)               { primary_sort_by_hash(n, a); }
+void bwamem3_primary_sort_by_hash_exact(int n, mem_alnreg_t *a)         { ks_introsort(mem_ars_hash, n, a); }
+void bwamem3_primary_sort_by_hash_alt(int n, mem_alnreg_t *a)           { primary_sort_by_hash_alt(n, a); }
+void bwamem3_primary_sort_by_hash_alt_exact(int n, mem_alnreg_t *a)     { ks_introsort(mem_ars_hash2, n, a); }
 
 #if MATE_SORT
 void sort_alnreg_re(int n, mem_alnreg_t* a) {
@@ -4229,7 +4253,7 @@ int mem_mark_primary_se(const mem_opt_t *opt, int n, mem_alnreg_t *a, int64_t id
         a[i].sub = a[i].alt_sc = 0, a[i].secondary = a[i].secondary_all = -1, a[i].hash = hash_64(id+i);
         if (!a[i].is_alt) ++n_pri;
     }
-    ks_introsort(mem_ars_hash, n, a);
+    primary_sort_by_hash(n, a);   /* == ks_introsort(mem_ars_hash), see the wrapper */
     mem_mark_primary_se_core(opt, n, a, &z);
     for (i = 0; i < n; ++i)
     {
@@ -4241,7 +4265,7 @@ int mem_mark_primary_se(const mem_opt_t *opt, int n, mem_alnreg_t *a, int64_t id
     if (n_pri >= 0 && n_pri < n)
     {
         kv_resize(int, z, n);
-        if (n_pri > 0) ks_introsort(mem_ars_hash2, n, a);
+        if (n_pri > 0) primary_sort_by_hash_alt(n, a);   /* == ks_introsort(mem_ars_hash2) */
         for (i = 0; i < n; ++i) z.a[a[i].secondary_all] = i;
         for (i = 0; i < n; ++i)
         {
