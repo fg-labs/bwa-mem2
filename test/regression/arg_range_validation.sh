@@ -62,4 +62,18 @@ check_reject "-I inf" "ERROR: -I mean insert size must be a finite number" -I in
 check_reject "-I 300,1e400" "ERROR: -I standard deviation must be a positive number" -I 300,1e400
 check_reject "-I 300,1,1e400" "ERROR: -I insert-size max must be a finite number" -I 300,1,1e400
 
-echo "PASS: arg_range_validation (-E and -I reject non-positive and non-finite values)"
+# strtol()/strtod() stop at the first non-numeric byte and the old parsers
+# applied the valid prefix, silently dropping the remainder. Require complete
+# consumption of the token so a typo fails loudly instead of running with a
+# value the user did not write.
+check_reject "-E 5abc" "ERROR: -E gap-extension penalty must be a positive integer" -E 5abc
+check_reject "-E 5,3xyz" "ERROR: -E gap-extension penalty must be a positive integer" -E 5,3xyz
+check_reject "-I 300,50xy" "ERROR: -I expects mean" -I 300,50xy
+check_reject "-I 300,50,junk" "ERROR: -I expects mean" -I 300,50,junk
+
+# A mean (or explicit max/min) large enough that the rounded insert-size bound
+# overflows int makes the (int) cast UB; reject on the double before casting.
+check_reject "-I 3000000000" "ERROR: -I mean/std imply an insert-size bound outside" -I 3000000000
+check_reject "-I 300,50,4000000000" "ERROR: -I insert-size max must be in" -I 300,50,4000000000
+
+echo "PASS: arg_range_validation (-E and -I reject non-positive, non-finite, out-of-range, and trailing-garbage values)"
