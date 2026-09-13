@@ -3357,6 +3357,17 @@ int main_mem(int argc, char *argv[])
                 __func__, g_smem_lockstep_n);
 #endif
 
+#if BWTSEED_LOCKSTEP_N > 1
+    /* Resolve the third-pass bwtseed lockstep on/off once, before the seeding
+     * workers spawn (policy: lockstep_width.h). Scheduling only, never output. */
+    {
+        const int32_t phys = bwa3_init_bwtseed_lockstep(opt->n_threads);
+        if (bwa_verbose >= 3)
+            fprintf(stderr, "[M::%s] third-pass bwtseed lockstep: %s (threads %d, physical cores %d; 0 = unknown)\n",
+                    __func__, g_bwtseed_lockstep ? "on" : "off", opt->n_threads, phys);
+    }
+#endif
+
     /* D3: load the ORIGINAL reference's bns/pac as resident handles for the
      * (future) extension/scoring phase — distinct from the seed FM-index above.
      * The seed BNS (aux.fmi->idx->bns) is the f/r-doubled converted reference
