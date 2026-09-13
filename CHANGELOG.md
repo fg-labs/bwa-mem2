@@ -1,5 +1,78 @@
 # Changelog
 
+## [0.12.0](https://github.com/fg-labs/bwa-mem3/compare/v0.11.0...v0.12.0) (2026-09-13)
+
+
+### Features
+
+* **cli:** add --rescue-skip=false opt-out form ([#472](https://github.com/fg-labs/bwa-mem3/issues/472)) ([ba8422f](https://github.com/fg-labs/bwa-mem3/commit/ba8422f76e9993bcd2e1babd6158c12b90587cbc))
+* **compat:** centralize the --compat divergence guard and add --compat-allow-divergent ([#477](https://github.com/fg-labs/bwa-mem3/issues/477)) ([b0be7d3](https://github.com/fg-labs/bwa-mem3/commit/b0be7d3ffd639ae05589c3782d6aacc41c421595))
+* **fast:** fold the score-gated chain-extension cap into --fast (--extend-tie-frac 0.95 + --extend-csub) ([#269](https://github.com/fg-labs/bwa-mem3/issues/269)) ([e5bcb2f](https://github.com/fg-labs/bwa-mem3/commit/e5bcb2f6c277d5910a6319324e4e6aa8434930aa))
+* **index:** bwamem3 index -u for runtime SA sampling ([#445](https://github.com/fg-labs/bwa-mem3/issues/445)) ([c55f3d9](https://github.com/fg-labs/bwa-mem3/commit/c55f3d966254dbeb62b3ea448df649709e4611da))
+* **index:** fmi_seed_api facade for external seeding consumers ([#446](https://github.com/fg-labs/bwa-mem3/issues/446)) ([0e6ed0f](https://github.com/fg-labs/bwa-mem3/commit/0e6ed0fdfca9e91a2aeb0b74401f8790ebb3cf27))
+
+
+### Bug Fixes
+
+* **bam:** clamp nst_nt4_table index in meth SEQ restore; harden header-filter guard ([#463](https://github.com/fg-labs/bwa-mem3/issues/463)) ([314e66d](https://github.com/fg-labs/bwa-mem3/commit/314e66d8f81f5aad8135f588507bd9ae99aac841))
+* **bandedSWA:** add symmetric ref/query length bounds guards to all wrappers ([#467](https://github.com/fg-labs/bwa-mem3/issues/467)) ([17ce8bc](https://github.com/fg-labs/bwa-mem3/commit/17ce8bcb82d10158540408cb1309f536f1a9e393))
+* **bandedSWA:** weight the 16-bit z-drop drift by the gap-extend penalty ([#471](https://github.com/fg-labs/bwa-mem3/issues/471)) ([b8e8572](https://github.com/fg-labs/bwa-mem3/commit/b8e85720ea902f895bbb79e7560527d104ea5e06))
+* **bandedSWA:** widen the qlen band-clamp reach so it can't overflow ([#468](https://github.com/fg-labs/bwa-mem3/issues/468)) ([c1e8e9e](https://github.com/fg-labs/bwa-mem3/commit/c1e8e9e06e0778add32d450c225da7ceba0c5d9e))
+* **bwamem:** eliminate srtg realloc-aliasing bug + harden unchecked reallocs ([#457](https://github.com/fg-labs/bwa-mem3/issues/457)) ([6d4a858](https://github.com/fg-labs/bwa-mem3/commit/6d4a8586dbdbbc5dd3b496013df2d9795345b42a))
+* **chain:** default path leaves the read unmapped when the weight filter drops every chain; docs state --compat per target ([#489](https://github.com/fg-labs/bwa-mem3/issues/489)) ([3954d65](https://github.com/fg-labs/bwa-mem3/commit/3954d6572d5f3204f5743ca1e5b7547af8e14d27))
+* clamp -t to MAX_THREADS; concurrency and API hardening ([#454](https://github.com/fg-labs/bwa-mem3/issues/454)) ([c651aa5](https://github.com/fg-labs/bwa-mem3/commit/c651aa5d02ac33497c24f191cfbce81cd50d73b2))
+* **cli:** memory-safety and input-handling correctness in the CLI/reader paths ([#459](https://github.com/fg-labs/bwa-mem3/issues/459)) ([741ffbe](https://github.com/fg-labs/bwa-mem3/commit/741ffbe9d31d26a9c6f6e6e59f4fa274462325ca))
+* fail-closed guards on reader/parser/IO error paths ([#451](https://github.com/fg-labs/bwa-mem3/issues/451)) ([c5dc86b](https://github.com/fg-labs/bwa-mem3/commit/c5dc86bbca815b9512686c978c563dbfb8769cfe))
+* **fmi:** correct the SA sentinel offset in the prefetch lookup; fence the uncompressed SA accessors ([#469](https://github.com/fg-labs/bwa-mem3/issues/469)) ([9d2190f](https://github.com/fg-labs/bwa-mem3/commit/9d2190fce2d2466515b9fdbf95caac0fbd722572))
+* **fmi:** fail-closed index validation, OOM and env-parse hardening ([#461](https://github.com/fg-labs/bwa-mem3/issues/461)) ([258de49](https://github.com/fg-labs/bwa-mem3/commit/258de4930b7e507fe327f076320ba36c067da72a))
+* **index:** don't exit() from inside the emit_0123 OpenMP region ([#462](https://github.com/fg-labs/bwa-mem3/issues/462)) ([268cf78](https://github.com/fg-labs/bwa-mem3/commit/268cf78f0e067aa2cc4d055fe20ce4a9045c47c0))
+* **index:** harden OOM and EOF error paths in index build and I/O wrappers ([#466](https://github.com/fg-labs/bwa-mem3/issues/466)) ([6234fb5](https://github.com/fg-labs/bwa-mem3/commit/6234fb52ace64357a8681cf2978c9b97dd743bea))
+* **kopen:** harden pipe/URL input opener and reap producer exit status ([#458](https://github.com/fg-labs/bwa-mem3/issues/458)) ([ed61b5e](https://github.com/fg-labs/bwa-mem3/commit/ed61b5ecd5ef9e04d7568a5126881327a0f52b42))
+* **mem:** free leaked input readers and read-memo scratch ([#502](https://github.com/fg-labs/bwa-mem3/issues/502)) ([4a93c7e](https://github.com/fg-labs/bwa-mem3/commit/4a93c7ebf51dcd7091f1711aa98daa812e7650c2))
+* **nt4:** guard signed-char high-bit bytes; unify the nt4 re-encoding idiom ([#456](https://github.com/fg-labs/bwa-mem3/issues/456)) ([0de026e](https://github.com/fg-labs/bwa-mem3/commit/0de026e8a848444827bfd38d71d112eec63e046b))
+* **numeric:** reject and guard divide-by-zero on -E 0 and -I mean,0 ([#460](https://github.com/fg-labs/bwa-mem3/issues/460)) ([c47de17](https://github.com/fg-labs/bwa-mem3/commit/c47de179191e1bac2df2fe5478b1cd86d4c03e6f))
+* overflow / negative-size / OOM-false-positive guards ([#453](https://github.com/fg-labs/bwa-mem3/issues/453)) ([167f643](https://github.com/fg-labs/bwa-mem3/commit/167f643c330e72f961fee577ef1cd706cb93ae55))
+* **reader:** fail loudly on a truncated gzip stream and guard over-long reads ([#464](https://github.com/fg-labs/bwa-mem3/issues/464)) ([5ea3150](https://github.com/fg-labs/bwa-mem3/commit/5ea3150dd295a50e2490208868df58ae877973ad))
+
+
+### Performance
+
+* **bam_rec_scratch:** grow scratch buffers geometrically; share the policy ([#455](https://github.com/fg-labs/bwa-mem3/issues/455)) ([de02336](https://github.com/fg-labs/bwa-mem3/commit/de0233633748a4022366c969b775d6ffe103693a))
+* **bam:** parallelize --bam BGZF compression, auto-scaled from -t (--bam-threads) ([#474](https://github.com/fg-labs/bwa-mem3/issues/474)) ([378d231](https://github.com/fg-labs/bwa-mem3/commit/378d231bf4c8cca07bcd4b26fb66dd3e0b905d8a))
+* **bandedSWA:** cache scoring-matrix LUTs in the constructor ([#476](https://github.com/fg-labs/bwa-mem3/issues/476)) ([6010149](https://github.com/fg-labs/bwa-mem3/commit/60101497ff8ed8ac22df03e0008a243fea8d227f))
+* **bandedSWA:** NEON extension kernel throughput (tiled SoA transpose, 16-bit tidy-up, Apple-only epilogue gate) ([#480](https://github.com/fg-labs/bwa-mem3/issues/480)) ([0310628](https://github.com/fg-labs/bwa-mem3/commit/0310628fba7975884671144d1665ea444c5ed192))
+* **chain:** prefetch the next chain's packed reference window ([#486](https://github.com/fg-labs/bwa-mem3/issues/486)) ([a8350aa](https://github.com/fg-labs/bwa-mem3/commit/a8350aa81c525ce61b263618a316e36041c4ccdd))
+* **dedup:** incremental by-score sort for the mate-rescue dedup calls ([#498](https://github.com/fg-labs/bwa-mem3/issues/498)) ([99034b4](https://github.com/fg-labs/bwa-mem3/commit/99034b41c98a4695c9b5ba8166fa6c9385801818))
+* **fmi:** branchless bit-plane test in the compressed-SA LF step (-0.6% CPU on Graviton4) ([#485](https://github.com/fg-labs/bwa-mem3/issues/485)) ([79d309a](https://github.com/fg-labs/bwa-mem3/commit/79d309a5bd71ed34491dfffc2a45c7572028f772))
+* **fmi:** count the k-only backward step's occurrence bits in NEON registers; gate backwardExt against a scalar reference ([#482](https://github.com/fg-labs/bwa-mem3/issues/482)) ([33c57ac](https://github.com/fg-labs/bwa-mem3/commit/33c57ac0516bbf9701d05b06da6f540dd12f9482))
+* **fmi:** default the compressed-SA resolver to 40 lanes on x86_64 ([#491](https://github.com/fg-labs/bwa-mem3/issues/491)) ([876cdab](https://github.com/fg-labs/bwa-mem3/commit/876cdab38656395f7871dd206180cdc0654b99fb))
+* **ksw:** Apple-gated incremental ring indexing in the NEON global kernels ([#484](https://github.com/fg-labs/bwa-mem3/issues/484)) ([792cd9e](https://github.com/fg-labs/bwa-mem3/commit/792cd9ec25ef5e67585a9c1c965f47c27d391648))
+* **mem:** look-ahead prefetch of the next read/pair's CIGAR-emission reference window ([#452](https://github.com/fg-labs/bwa-mem3/issues/452)) ([eb0c8c1](https://github.com/fg-labs/bwa-mem3/commit/eb0c8c17d28d2f4fe11178b152a49a279da99c11))
+* **meth:** prune 3-letter over-seeding before SA resolution (~30% faster --meth) ([#441](https://github.com/fg-labs/bwa-mem3/issues/441)) ([f3048f0](https://github.com/fg-labs/bwa-mem3/commit/f3048f0b178f0cf0d63c4f6817fbae4dbcf60556))
+* **ref:** SIMD 2-bit-&gt;byte reference unpack (fwd+rev, all arches) + prefetch short-ext/mate-rescue fetches ([#448](https://github.com/fg-labs/bwa-mem3/issues/448)) ([6955c8e](https://github.com/fg-labs/bwa-mem3/commit/6955c8e86dcae7f2ea9cd1e89abbe73ae539ad72))
+* **rescue:** NEON mate-rescue kernel throughput (lazy query end, pad gather, 16-bit port, tiled SoA, epilogue trims, block checkpointing) ([#479](https://github.com/fg-labs/bwa-mem3/issues/479)) ([38ff9bb](https://github.com/fg-labs/bwa-mem3/commit/38ff9bbba4134b5a4c76779992db4d831177010c))
+* **sam_encode:** finish the SSSE3 SEQ/QUAL encoders with one overlapped vector instead of a scalar tail ([#490](https://github.com/fg-labs/bwa-mem3/issues/490)) ([9ed9bc6](https://github.com/fg-labs/bwa-mem3/commit/9ed9bc65ebe2a0708b9794805469bf025c66d801))
+* **sam_encode:** NEON SEQ/QUAL encoders finish with one overlapped vector; single-lookup reverse ([#481](https://github.com/fg-labs/bwa-mem3/issues/481)) ([823c9ba](https://github.com/fg-labs/bwa-mem3/commit/823c9ba06c039c2e7630f185d41cebf94f0510e3))
+* **seeding:** enable the third-pass bwtseed lockstep on x86 when every thread has its own physical core ([#497](https://github.com/fg-labs/bwa-mem3/issues/497)) ([63eb8a4](https://github.com/fg-labs/bwa-mem3/commit/63eb8a4a6d6617cbcf7391e0a638c62d9c5e85f3))
+* **sort:** pdqsort for the pairing and primary-marking sorts, hold-and-shift insertion pass in ks_introsort ([#499](https://github.com/fg-labs/bwa-mem3/issues/499)) ([3b72796](https://github.com/fg-labs/bwa-mem3/commit/3b727965c3b5f4b091d973ffa3507cacbc6bd4da))
+* **x86:** build the AVX2 / AVX-512BW 16-bit batch wrappers' SoA with a tiled transpose ([#495](https://github.com/fg-labs/bwa-mem3/issues/495)) ([b4a4e61](https://github.com/fg-labs/bwa-mem3/commit/b4a4e61f95533d021763ed431ea9d1339fa3f086))
+* **x86:** build the AVX2 / AVX-512BW 8-bit batch wrappers' SoA with a tiled transpose ([#492](https://github.com/fg-labs/bwa-mem3/issues/492)) ([a609cc7](https://github.com/fg-labs/bwa-mem3/commit/a609cc7e6a621715daab9f5d52efef8fec0addbf))
+* **x86:** lower the AVX2 int16 wavefront crossover for global alignment to w &gt;= 10 ([#496](https://github.com/fg-labs/bwa-mem3/issues/496)) ([f51752b](https://github.com/fg-labs/bwa-mem3/commit/f51752b2b256e77c61922deb8924114517f6444b))
+* **x86:** skip the AVX2 / AVX-512BW 8-bit extension kernels' wide per-row epilogue when no lane can change ([#494](https://github.com/fg-labs/bwa-mem3/issues/494)) ([a445084](https://github.com/fg-labs/bwa-mem3/commit/a445084f9356d46a1ebb1577ae6316424bc53ccc))
+
+
+### Refactoring
+
+* remove dead legacy BWT-index API, SMEM iterator, and AFF blocks ([#465](https://github.com/fg-labs/bwa-mem3/issues/465)) ([1dbb072](https://github.com/fg-labs/bwa-mem3/commit/1dbb072710cefefe9381be7fbb48885e62306952))
+
+
+### Documentation
+
+* correct source-doc comments; add fr_fastq CRLF-in-quality test case ([#450](https://github.com/fg-labs/bwa-mem3/issues/450)) ([8ab82b6](https://github.com/fg-labs/bwa-mem3/commit/8ab82b6c0d41448d4335f35acda308797ea279ae))
+* **equivalence:** drop an out-of-scope external cross-reference from the gap-from-M note ([#442](https://github.com/fg-labs/bwa-mem3/issues/442)) ([1a4a8bd](https://github.com/fg-labs/bwa-mem3/commit/1a4a8bd878ed140874ddb52090f31f6be2b87d4e))
+* neutralize internal tooling names in source comments ([#449](https://github.com/fg-labs/bwa-mem3/issues/449)) ([426ea8d](https://github.com/fg-labs/bwa-mem3/commit/426ea8dcc8a962a75dcd6c473d784889c387e5ed))
+* **readme:** update performance tables for v0.11.0 ([#443](https://github.com/fg-labs/bwa-mem3/issues/443)) ([bd42358](https://github.com/fg-labs/bwa-mem3/commit/bd423584fa114873d6bfa95d3812c19c4a0df649))
+
 ## [0.11.0](https://github.com/fg-labs/bwa-mem3/compare/v0.10.0...v0.11.0) (2026-09-01)
 
 
