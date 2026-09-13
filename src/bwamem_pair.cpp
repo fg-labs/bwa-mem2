@@ -2041,7 +2041,8 @@ int mem_matesw_batch_pre(const mem_opt_t *opt, const bntseq_t *bns,
                     *wsize_buf_ref = seqbuf_grow_capacity(tmp);
                     if (*wsize_buf_ref == SEQBUF_CAPACITY_OVERFLOW)
                         seqbuf_capacity_fatal("seqBufRef", __func__, tmp);
-                    assert(*wsize_buf_ref > refOffset + sp.len1);
+                    xassert(*wsize_buf_ref >= refOffset + sp.len1,
+                            "mate rescue: reference window exceeds seqBufRef capacity after grow");
 
                     uint8_t *seqBufRef_ = (uint8_t*)
                         _mm_realloc(seqBufRef, tmp, *wsize_buf_ref, sizeof(uint8_t)); 
@@ -2061,7 +2062,8 @@ int mem_matesw_batch_pre(const mem_opt_t *opt, const bntseq_t *bns,
                     *wsize_buf_qer = seqbuf_grow_capacity(tmp);
                     if (*wsize_buf_qer == SEQBUF_CAPACITY_OVERFLOW)
                         seqbuf_capacity_fatal("seqBufQer", __func__, tmp);
-                    assert(*wsize_buf_qer > qerOffset + sp.len2);
+                    xassert(*wsize_buf_qer >= qerOffset + sp.len2,
+                            "mate rescue: mate query exceeds seqBufQer capacity after grow");
 
                     uint8_t *seqBufQer_ = (uint8_t*)
                         _mm_realloc(seqBufQer, tmp, *wsize_buf_qer, sizeof(uint8_t)); 
