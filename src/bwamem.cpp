@@ -4800,7 +4800,13 @@ mem_aln_t mem_reg2aln(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *
         last_sc = score;
         w2 <<= 1;
     } while (++i < 3 && score < ar->truesc - opt->a);
-    assert(a.cigar != NULL);
+    /* bwa_gen_cigar3 legitimately returns NULL (with n_cigar = 0) on its
+     * geometry rejects -- empty query, rb >= re, or a window bridging the
+     * forward/reverse strands -- and the strlen below would then read through
+     * NULL. A valid alnreg cannot produce any of those, so this is a guard on
+     * the callee's contract, not an invariant the local control flow
+     * establishes; keep it live in every build. */
+    xassert(a.cigar != NULL, "bwa_gen_cigar3 returned no CIGAR for a valid region");
     l_MD = strlen((char*)(a.cigar + a.n_cigar)) + 1;
     a.NM = NM;
     pos = bns_depos(bns, rb < bns->l_pac? rb : re - 1, &is_rev);

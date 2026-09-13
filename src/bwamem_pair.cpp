@@ -2032,7 +2032,14 @@ int mem_matesw_batch_pre(const mem_opt_t *opt, const bntseq_t *bns,
                 sp.len2 = l_ms;
                 sp.id = sp.score = sp.seqid = sp.gtle = sp.tle = sp.qle = sp.max_off = sp.gscore = -1; // not needed, remove while code cleaning
             
-                assert(sp.len1 >= 0 && sp.len2 >= 0);
+                /* Both lengths are cast to size_t as memcpy counts into the
+                 * staged seqBufRef/seqBufQer below, so a negative value here
+                 * is a heap overrun rather than a wrong answer. re > rb holds
+                 * only through the enclosing `re - rb >= opt->min_seed_len`
+                 * guard, and -k is an unvalidated atoi, so keep the check live
+                 * in every build (cf. the post-grow capacity xasserts below). */
+                xassert(sp.len1 >= 0 && sp.len2 >= 0,
+                        "mate rescue: negative reference-window or mate length");
                 if (refOffset + sp.len1 >= *wsize_buf_ref)
                 {
                     if (bwa_verbose >= 4) fprintf(stderr, "[0000][%0.4d] Re-allocating (doubling) seqBufRefs in %s\n",
