@@ -76,7 +76,7 @@ static kswq_t *ksw_qinit(int size, int qlen, const uint8_t *query, int m, const 
 	p = 8 * (3 - size); // # values per __m128i
 	slen = (qlen + p - 1) / p; // segmented length
 	q = (kswq_t*)malloc(sizeof(kswq_t) + 256 + 16 * slen * (m + 4)); // a single block of memory
-    assert(q != NULL);
+    xassert(q != NULL, "out of memory: q");
 	q->qp = (__m128i*)(((size_t)q + sizeof(kswq_t) + 15) >> 4 << 4); // align memory
 	q->H0 = q->qp + slen * m;
 	q->H1 = q->H0 + slen;
@@ -409,9 +409,9 @@ int ksw_extend2(int qlen, const uint8_t *query, int tlen, const uint8_t *target,
 	assert(h0 > 0);
 	// allocate memory
 	qp = (int8_t *) malloc(qlen * m);
-    assert(qp != NULL);
+    xassert(qp != NULL, "out of memory: qp");
 	eh = (eh_t *) calloc(qlen + 1, 8);
-    assert(eh != NULL);
+    xassert(eh != NULL, "out of memory: eh");
 	// generate the query profile
 	for (k = i = 0; k < m; ++k) {
 		const int8_t *p = &mat[k * m];
@@ -543,15 +543,15 @@ static int ksw_global2_scalar(int qlen, const uint8_t *query, int tlen, const ui
 	n_col = qlen < 2*w+1? qlen : 2*w+1; // maximum #columns of the backtrack matrix
     if (n_cigar_ && cigar_) {
         z = (uint8_t *) malloc((long)n_col * tlen);
-        assert(z != NULL);
+        xassert(z != NULL, "out of memory: z");
     }
     else {
         z = 0;
     }
 	qp = (int8_t *) malloc(qlen * m);
-    assert(qp != NULL);
+    xassert(qp != NULL, "out of memory: qp");
 	eh = (eh_t *) calloc(qlen + 1, 8);
-    assert(eh != NULL);
+    xassert(eh != NULL, "out of memory: eh");
 	// generate the query profile
 	for (k = i = 0; k < m; ++k) {
 		const int8_t *p = &mat[k * m];
